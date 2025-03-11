@@ -4,7 +4,7 @@ import os
 import tempfile
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import Dict, Generator
+from typing import Generator
 
 from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile, status
 from fastapi.security import APIKeyHeader
@@ -14,9 +14,17 @@ from pydantic import BaseModel
 logger = logging.getLogger("uvicorn")
 
 
-# Models & Schema - Simplified to match OpenAI's basic response
 class TranscriptionResponse(BaseModel):
-    text: str  # OpenAI returns a simple {"text": "transcription"} structure
+    text: str
+
+
+class ModelInfo(BaseModel):
+    id: str
+    name: str
+
+
+class ModelsResponse(BaseModel):
+    data: list[ModelInfo]
 
 
 # Authentication
@@ -60,6 +68,35 @@ def get_model() -> WhisperModel:
     return whisper_model
 
 
+def get_available_whisper_models() -> list[ModelInfo]:
+    """Get available Whisper models."""
+    # Faster Whisper supports these models
+    models = [
+        "tiny.en",
+        "tiny",
+        "base.en",
+        "base",
+        "small.en",
+        "small",
+        "medium.en",
+        "medium",
+        "large-v1",
+        "large-v2",
+        "large-v3",
+        "large",
+        "distil-large-v2",
+        "distil-medium.en",
+        "distil-small.en",
+        "distil-large-v3",
+        "large-v3-turbo",
+        "turbo",
+    ]
+    return [
+        ModelInfo(id=f"faster-whisper/{model}", name=f"Faster Whisper: {model}")
+        for model in models
+    ]
+
+
 async def save_upload_file(upload_file: UploadFile) -> str:
     try:
         suffix = os.path.splitext(upload_file.filename or "audio.wav")[1]
@@ -78,7 +115,7 @@ async def save_upload_file(upload_file: UploadFile) -> str:
 async def process_transcription(
     file_path: str,
     language: str | None = None,
-) -> tuple[Generator, Dict]:
+) -> tuple[Generator, dict]:
     model = get_model()
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -95,6 +132,24 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.get(
+    "/v1/models",
+    response_model=ModelsResponse,
+    dependencies=[Depends(verify_api_key)],
+)
+async def list_models():
+    """List available models in OpenAI-compatible format"""
+    try:
+        models = get_available_whisper_models()
+        return ModelsResponse(data=models)
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list models: {str(e)}",
+        )
 
 
 @app.post(
