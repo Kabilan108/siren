@@ -1,17 +1,28 @@
 import asyncio
+import json
 import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from functools import lru_cache
+from pathlib import Path
 from typing import Generator
 
+import torch
 from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile, status
 from fastapi.security import APIKeyHeader
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
 logger = logging.getLogger("uvicorn")
+
+API_KEY = os.environ.get("API_KEY", "dev_key")
+CONFIG_FILE = Path("~/config.json").expanduser()
+DEFAULT_MODEL = "distil-small.en"
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+current_model: WhisperModel | None = None
+current_model_name: str | None = None
 
 
 class TranscriptionResponse(BaseModel):
@@ -20,16 +31,24 @@ class TranscriptionResponse(BaseModel):
 
 class ModelInfo(BaseModel):
     id: str
-    name: str
 
 
 class ModelsResponse(BaseModel):
     data: list[ModelInfo]
 
 
-# Authentication
-API_KEY = os.environ.get("API_KEY", "dev_key")
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+def get_whisper_params():
+    """Get parameters for WhisperModel"""
+    if torch.cuda.is_available():
+        device = "cuda"
+        compute_type = "float16"
+    else:
+        device = "cpu"
+        compute_type = "int8"
+    return {
+        "device": device,
+        "compute_type": compute_type,
+    }
 
 
 def verify_api_key(api_key: str = Security(api_key_header)) -> str:
@@ -40,32 +59,30 @@ def verify_api_key(api_key: str = Security(api_key_header)) -> str:
     return api_key
 
 
-# Application state and lifespan
-whisper_model = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global whisper_model
-    logger.info("Loading Whisper model...")
-    model_size = "distil-large-v3"
-    whisper_model = WhisperModel(model_size, device="cuda", compute_type="float16")
+    global current_model, current_model_name
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r") as f:
+                config = json.load(f)
+                current_model_name = config.get("model", DEFAULT_MODEL)
+        else:
+            current_model_name = DEFAULT_MODEL
+    except Exception as e:
+        logger.warn(f"Failed to load config, using default model: {e}")
+        current_model_name = DEFAULT_MODEL
+
+    logger.info(f"Loading Whisper model: {current_model_name}")
+    current_model = WhisperModel(
+        current_model_name, device="cuda", compute_type="float16"
+    )
     logger.info("Whisper model loaded successfully")
     yield
     logger.info("Shutting down and cleaning up resources...")
-    del whisper_model
+    del current_model
+    torch.cuda.empty_cache()
     logger.info("Cleanup complete")
-
-
-# Helper functions
-@lru_cache(maxsize=1)
-def get_model() -> WhisperModel:
-    if whisper_model is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Transcription model not loaded",
-        )
-    return whisper_model
 
 
 def get_available_whisper_models() -> list[ModelInfo]:
@@ -91,10 +108,16 @@ def get_available_whisper_models() -> list[ModelInfo]:
         "large-v3-turbo",
         "turbo",
     ]
-    return [
-        ModelInfo(id=f"faster-whisper/{model}", name=f"Faster Whisper: {model}")
-        for model in models
-    ]
+    return [ModelInfo(id=m) for m in models]
+
+
+def save_config(model_name: str):
+    """Save the current model name to config file."""
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"model": model_name}, f)
+    except Exception as e:
+        logger.warn(f"Failed to save config: {e}")
 
 
 async def save_upload_file(upload_file: UploadFile) -> str:
@@ -114,16 +137,49 @@ async def save_upload_file(upload_file: UploadFile) -> str:
 
 async def process_transcription(
     file_path: str,
+    model: WhisperModel,
     language: str | None = None,
 ) -> tuple[Generator, dict]:
-    model = get_model()
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: model.transcribe(
-            file_path, beam_size=5, language=language, condition_on_previous_text=False
-        ),
+        lambda: model.transcribe(file_path, language=language),
     )
+
+
+async def get_whisper_model(model: str | None = None) -> WhisperModel:
+    global current_model, current_model_name
+    available_models = {m.id for m in get_available_whisper_models()}
+
+    target_model = model if model is not None else current_model_name
+
+    if target_model not in available_models:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invalid model: '{target_model}'. Use /v1/models to see available models.",
+        )
+
+    if target_model == current_model_name and current_model is not None:
+        return current_model
+
+    logger.info(f"Switching model from '{current_model_name}' to '{target_model}'")
+    try:
+        if current_model is not None:
+            del current_model
+            torch.cuda.empty_cache()
+
+        current_model = WhisperModel(target_model, **get_whisper_params())
+        current_model_name = target_model
+        save_config(target_model)
+        logger.info(f"Whisper model '{current_model_name}' loaded successfully")
+        return current_model
+
+    except Exception as e:
+        logger.error(f"Failed to load model '{target_model}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load model '{target_model}': {str(e)}",
+        )
 
 
 app = FastAPI(
@@ -160,13 +216,14 @@ async def list_models():
 async def transcribe_audio(
     file: UploadFile = File(...),
     language: str | None = None,
+    model: str | None = None,
+    whisper_model: WhisperModel = Depends(get_whisper_model),
 ):
     """OpenAI compatible transcription endpoint"""
     file_path = await save_upload_file(file)
     try:
         logger.info(f"Starting transcription for file: {file.filename}")
-        segments, info = await process_transcription(file_path, language)
-        # Combine all segment texts into a single string, like OpenAI does
+        segments, info = await process_transcription(file_path, whisper_model, language)
         full_text = " ".join(segment.text.strip() for segment in segments)
         logger.info(
             f"Transcription completed. Text length: {len(full_text)} characters"
