@@ -6,7 +6,7 @@ services:
     ports:
       - "9934:8000"
     volumes:
-      - $USER_DATA/huggingface:/root/.cache/huggingface
+      - ${HF_HOME}:/root/.cache/huggingface
     environment:
       - API_KEY=${WHISPER_API_KEY:-dev_key}
     deploy:
