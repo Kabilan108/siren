@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import os
@@ -136,14 +137,16 @@ async def save_upload_file(upload_file: UploadFile) -> str:
 
 
 async def process_transcription(
-    file_path: str,
+    audio_data: bytes,
     model: WhisperModel,
     language: str | None = None,
 ) -> tuple[Generator, dict]:
+    """Process transcription directly from audio bytes"""
+    audio_buffer = io.BytesIO(audio_data)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: model.transcribe(file_path, language=language),
+        lambda: model.transcribe(audio_buffer, language=language),
     )
 
 
@@ -220,11 +223,19 @@ async def transcribe_audio(
     whisper_model: WhisperModel = Depends(get_whisper_model),
 ):
     """OpenAI compatible transcription endpoint"""
-    file_path = await save_upload_file(file)
     try:
-        logger.info(f"Starting transcription for file: {file.filename}")
-        segments, info = await process_transcription(file_path, whisper_model, language)
+        # Read audio data directly into memory
+        audio_data = await file.read()
+        logger.info(
+            f"Starting transcription for file: {file.filename}, size: {len(audio_data)} bytes"
+        )
+
+        # Process transcription directly with audio bytes
+        segments, info = await process_transcription(
+            audio_data, whisper_model, language
+        )
         full_text = " ".join(segment.text.strip() for segment in segments)
+
         logger.info(
             f"Transcription completed. Text length: {len(full_text)} characters"
         )
@@ -236,8 +247,8 @@ async def transcribe_audio(
             detail=f"Transcription failed: {str(e)}",
         )
     finally:
-        if os.path.exists(file_path):
-            os.unlink(file_path)
+        # No file cleanup needed anymore since we're not saving to disk
+        await file.close()
 
 
 if __name__ == "__main__":
