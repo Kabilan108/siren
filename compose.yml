@@ -1,0 +1,29 @@
+services:
+  whisper-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9934:8000"
+    volumes:
+      - $USER_DATA/huggingface:/root/.cache/huggingface
+    environment:
+      - API_KEY=${API_KEY:-api_key}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  whisper-cpu:
+    build:
+      context: .
+      dockerfile: cpu.Dockerfile
+    ports:
+      - "9934:8000"
+    volumes:
+      - $USER_DATA/huggingface:/root/.cache/huggingface
+    environment:
+      - API_KEY=${WHISPER_API_KEY:-api_key}

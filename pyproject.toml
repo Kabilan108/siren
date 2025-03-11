@@ -1,0 +1,12 @@
+[project]
+name = "server"
+version = "0.1.0"
+description = "OpenAI compatible whisper server with a Faster Whisper backend"
+requires-python = "==3.11.8"
+dependencies = [
+    "fastapi[standard]>=0.115.11",
+    "faster-whisper>=1.1.1",
+    "loguru>=0.7.3",
+    "pydantic>=2.10.6",
+    "python-multipart>=0.0.9",
+]
