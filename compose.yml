@@ -2,7 +2,7 @@ services:
   whisper-gpu:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.gpu
     ports:
       - "9934:8000"
     volumes:
@@ -20,7 +20,7 @@ services:
   whisper-cpu:
     build:
       context: .
-      dockerfile: cpu.Dockerfile
+      dockerfile: Dockerfile.cpu
     ports:
       - "9934:8000"
     volumes:
