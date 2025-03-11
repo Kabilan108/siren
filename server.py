@@ -75,9 +75,7 @@ async def lifespan(app: FastAPI):
         current_model_name = DEFAULT_MODEL
 
     logger.info(f"Loading Whisper model: {current_model_name}")
-    current_model = WhisperModel(
-        current_model_name, device="cuda", compute_type="float16"
-    )
+    current_model = WhisperModel(current_model_name, **get_whisper_params())
     logger.info("Whisper model loaded successfully")
     yield
     logger.info("Shutting down and cleaning up resources...")
