@@ -10,17 +10,17 @@ from typing import Generator
 
 import torch
 from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile, status
-from fastapi.security import APIKeyHeader
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
 logger = logging.getLogger("uvicorn")
 
-API_KEY = os.environ.get("API_KEY", "dev_key")
+TOKEN = os.environ.get("SIREN_API_KEY", "dev_token")
 CONFIG_FILE = Path("~/config.json").expanduser()
 DEFAULT_MODEL = "distil-small.en"
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+token_header = HTTPBearer(auto_error=False)
 
 current_model: WhisperModel | None = None
 current_model_name: str | None = None
@@ -52,12 +52,28 @@ def get_whisper_params():
     }
 
 
-def verify_api_key(api_key: str = Security(api_key_header)) -> str:
-    if api_key != API_KEY:
+def verify_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(token_header),
+) -> str:
+    if credentials is None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WW-Authenticate": "Bearer"},
         )
-    return api_key
+    if credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication scheme. Bearer token required.",
+            headers={"WW-Authenticate": "Bearer"},
+        )
+    if credentials.credentials != TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token.",
+            headers={"WW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
 
 
 @asynccontextmanager
@@ -194,7 +210,7 @@ app = FastAPI(
 @app.get(
     "/v1/models",
     response_model=ModelsResponse,
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_token)],
 )
 async def list_models():
     """List available models in OpenAI-compatible format"""
@@ -212,7 +228,7 @@ async def list_models():
 @app.post(
     "/v1/audio/transcriptions",
     response_model=TranscriptionResponse,
-    dependencies=[Depends(verify_api_key)],
+    dependencies=[Depends(verify_token)],
 )
 async def transcribe_audio(
     file: UploadFile = File(...),

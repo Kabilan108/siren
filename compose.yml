@@ -8,7 +8,7 @@ services:
     volumes:
       - ${HF_HOME}:/root/.cache/huggingface
     environment:
-      - API_KEY=${SIREN_API_KEY}
+      - SIREN_API_KEY=${SIREN_API_KEY}
     deploy:
       resources:
         reservations:
@@ -26,4 +26,4 @@ services:
     volumes:
       - $USER_DATA/huggingface:/root/.cache/huggingface
     environment:
-      - API_KEY=${SIREN_API_KEY}
+      - SIREN_API_KEY=${SIREN_API_KEY}
