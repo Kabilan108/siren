@@ -1,5 +1,5 @@
 services:
-  siren-gpu:
+  siren:
     build:
       context: .
       dockerfile: Dockerfile.gpu
