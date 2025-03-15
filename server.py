@@ -6,10 +6,10 @@ import os
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Optional
 
 import torch
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
@@ -235,16 +235,21 @@ async def list_models():
 )
 async def transcribe_audio(
     file: UploadFile = File(...),
-    language: str | None = None,
-    model: str | None = None,
+    model: str | None = Form(
+        None,
+        description="ID of the model to use. Only whisper-1 (which is powered by our open source Whisper V2 model) is currently available.",
+    ),
+    language: str | None = Form(
+        None,
+        description="The language of the input audio. Supplying the input language in ISO-639-1 format will improve accuracy and latency.",
+    ),
     whisper_model: WhisperModel = Depends(get_whisper_model),
 ):
     """OpenAI compatible transcription endpoint"""
     try:
-        # Read audio data directly into memory
         audio_data = await file.read()
         logger.info(
-            f"Starting transcription for file: {file.filename}, size: {len(audio_data)} bytes"
+            f"Starting transcription for file: {file.filename}, size: {len(audio_data)} bytes, model: {model}, language: {language}"
         )
 
         # Process transcription directly with audio bytes
@@ -264,7 +269,6 @@ async def transcribe_audio(
             detail=f"Transcription failed: {str(e)}",
         )
     finally:
-        # No file cleanup needed anymore since we're not saving to disk
         await file.close()
 
 
