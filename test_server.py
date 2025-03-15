@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+
 from server import (
     WhisperModel,
     app,
@@ -10,7 +11,7 @@ from server import (
 )
 
 # Constants
-API_KEY = "dev_key"
+TOKEN = "dev_token"
 VALID_MODEL = "distil-small.en"
 INVALID_MODEL = "invalid-model"
 
@@ -25,8 +26,10 @@ def client():
 def mock_whisper_model():
     """Mock WhisperModel instance"""
     mock = MagicMock(spec=WhisperModel)
+    # Create a mock segment with the expected text
+    expected_text = "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
     mock.transcribe.return_value = (
-        [type("Segment", (), {"text": "Hello world"})()],  # Mock segments
+        [type("Segment", (), {"text": expected_text})()],  # Mock segments
         {"language": "en"},  # Mock info
     )
     return mock
@@ -35,15 +38,16 @@ def mock_whisper_model():
 @pytest.fixture(autouse=True)
 def setup_environment(monkeypatch, tmp_path):
     """Set up environment variables and config file"""
-    monkeypatch.setenv("API_KEY", API_KEY)
+    # Directly patch the TOKEN value in server
+    monkeypatch.setattr("server.TOKEN", TOKEN)
     config_file = tmp_path / "config.json"
     monkeypatch.setattr("server.CONFIG_FILE", config_file)
     return config_file
 
 
 def test_list_models_success(client):
-    """Test listing available models with valid API key"""
-    response = client.get("/v1/models", headers={"X-API-Key": API_KEY})
+    """Test listing available models with valid Bearer token"""
+    response = client.get("/v1/models", headers={"Authorization": f"Bearer {TOKEN}"})
 
     assert response.status_code == 200
     data = response.json()
@@ -55,11 +59,33 @@ def test_list_models_success(client):
 
 
 def test_list_models_unauthorized(client):
-    """Test listing models without API key"""
+    """Test listing models without Bearer token"""
     response = client.get("/v1/models")
 
+    assert response.status_code == 403
+    # With HTTPBearer(auto_error=True), FastAPI returns a 403 with a default error message
+    assert "not authenticated" in response.json()["detail"].lower()
+
+
+def test_list_models_invalid_scheme(client):
+    """Test listing models with invalid authentication scheme"""
+    response = client.get("/v1/models", headers={"Authorization": f"Basic {TOKEN}"})
+
+    assert response.status_code == 403
+    # When auto_error=True in HTTPBearer, FastAPI's default error message is used
+    # The exact error message can vary, but will indicate invalid credentials
+    detail_lower = response.json()["detail"].lower()
+    assert any(msg in detail_lower for msg in ["invalid", "credentials", "not authenticated"])
+
+
+def test_list_models_invalid_token(client):
+    """Test listing models with invalid token"""
+    response = client.get(
+        "/v1/models", headers={"Authorization": "Bearer invalid_token"}
+    )
+
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid API key"
+    assert response.json()["detail"] == "Invalid token."
 
 
 @pytest.mark.asyncio
@@ -70,15 +96,16 @@ async def test_transcribe_audio_success(client, mock_whisper_model):
             audio_data = audio_file.read()
         response = client.post(
             "/v1/audio/transcriptions",
-            headers={"X-API-Key": API_KEY},
+            headers={"Authorization": f"Bearer {TOKEN}"},
             files={"file": ("test.wav", audio_data, "audio/wav")},
             params={"model": "distil-large-v3"},  # Explicitly set a valid model
         )
-        print(response.text)  # Debug output
         assert response.status_code == 200
         data = response.json()
         assert "text" in data
-        assert data["text"] == "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
+        # Check that we get the expected text from our mock
+        expected_text = "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
+        assert data["text"] == expected_text
 
 
 @pytest.mark.asyncio
@@ -90,7 +117,7 @@ async def test_transcribe_audio_invalid_model(client):
 
     response = client.post(
         "/v1/audio/transcriptions",
-        headers={"X-API-Key": API_KEY},
+        headers={"Authorization": f"Bearer {TOKEN}"},
         files={"file": ("test.wav", audio_data, "audio/wav")},
         params={"model": INVALID_MODEL},
     )
@@ -100,7 +127,7 @@ async def test_transcribe_audio_invalid_model(client):
 
 
 def test_transcribe_audio_unauthorized(client):
-    """Test transcription without API key"""
+    """Test transcription without Bearer token"""
     audio_data = io.BytesIO(
         b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00data\x00\x00\x00\x00"
     )
@@ -110,8 +137,8 @@ def test_transcribe_audio_unauthorized(client):
         files={"file": ("test.wav", audio_data, "audio/wav")},
     )
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid API key"
+    assert response.status_code == 403
+    assert "not authenticated" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

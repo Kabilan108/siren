@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Generator
 
 import torch
-from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
@@ -20,7 +20,7 @@ TOKEN = os.environ.get("SIREN_API_KEY", "dev_token")
 CONFIG_FILE = Path("~/config.json").expanduser()
 DEFAULT_MODEL = "distil-small.en"
 
-token_header = HTTPBearer(auto_error=False)
+token_header = HTTPBearer(auto_error=True)
 
 current_model: WhisperModel | None = None
 current_model_name: str | None = None
@@ -55,24 +55,28 @@ def get_whisper_params():
 def verify_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(token_header),
 ) -> str:
+    """Verify the Bearer token"""
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
             headers={"WW-Authenticate": "Bearer"},
         )
+
     if credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication scheme. Bearer token required.",
             headers={"WW-Authenticate": "Bearer"},
         )
+
     if credentials.credentials != TOKEN:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token.",
             headers={"WW-Authenticate": "Bearer"},
         )
+
     return credentials.credentials
 
 
