@@ -163,8 +163,7 @@ async def process_transcription(
     audio_buffer = io.BytesIO(audio_data)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None,
-        lambda: model.transcribe(audio_buffer, language=language),
+        None, lambda: model.transcribe(audio_buffer, language=language)
     )
 
 
