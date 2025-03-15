@@ -1,4 +1,4 @@
-# Whisper Server
+# siren
 
 A simple server using OpenAI's Whisper model for my personal audio transcription needs.
 
@@ -20,13 +20,13 @@ This project sets up a lightweight server to process audio files using Whisper. 
 Run this if your machine has nvidia gpu (make sure you have the Nvidia Container Toolkit installed):
 
 ```bash
-docker compose up -d whisper-gpu
+docker compose up -d siren-gpu
 ```
 
 If your machine does not have a GPU:
 
 ```bash
-docker compose up -d whisper-cpu
+docker compose up -d siren-cpu
 ```
 
 ## Running Tests

@@ -1,5 +1,5 @@
 services:
-  whisper-gpu:
+  siren-gpu:
     build:
       context: .
       dockerfile: Dockerfile.gpu
@@ -17,7 +17,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  whisper-cpu:
+  siren-cpu:
     build:
       context: .
       dockerfile: Dockerfile.cpu

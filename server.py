@@ -184,7 +184,7 @@ async def get_whisper_model(model: str | None = None) -> WhisperModel:
 
 
 app = FastAPI(
-    title="Speech-to-Text API Server",
+    title="siren",
     description="API for transcribing audio using Whisper, compatible with OpenAI schema",
     version="1.0.0",
     lifespan=lifespan,
