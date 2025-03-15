@@ -243,10 +243,11 @@ async def transcribe_audio(
         None,
         description="The language of the input audio. Supplying the input language in ISO-639-1 format will improve accuracy and latency.",
     ),
-    whisper_model: WhisperModel = Depends(get_whisper_model),
 ):
     """OpenAI compatible transcription endpoint"""
     try:
+        whisper_model = await get_whisper_model(model)
+
         audio_data = await file.read()
         logger.info(
             f"Starting transcription for file: {file.filename}, size: {len(audio_data)} bytes, model: {model}, language: {language}"
