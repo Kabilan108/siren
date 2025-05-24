@@ -1,12 +1,24 @@
-# CLAUDE.md - Siren Project Guidelines
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+Siren is an OpenAI-compatible Whisper server using Faster Whisper backend for audio transcription. It exposes `/v1/models` and `/v1/audio/transcriptions` endpoints with Bearer token authentication. The server supports dynamic model switching with persistence via config.json.
 
 ## Build & Run Commands
 - Install dependencies: `uv sync --frozen`
 - Run server: `uv run fastapi run server.py`
 - Run tests: `uv run pytest`
 - Run single test: `uv run pytest test_server.py::test_function_name -v`
-- Docker GPU: `docker compose up -d siren-gpu`
+- Docker GPU: `docker compose up -d siren`
 - Docker CPU: `docker compose up -d siren-cpu`
+
+## Architecture
+- **Global State**: `current_model` and `current_model_name` track the loaded WhisperModel instance
+- **Model Management**: `get_whisper_model()` handles model loading/switching with automatic GPU detection
+- **Authentication**: `verify_token()` dependency validates Bearer tokens against `SIREN_API_KEY` env var
+- **Configuration**: User config persisted in `~/config.json` with model preference
+- **Lifespan**: App startup loads saved model, shutdown cleans GPU memory
 
 ## Code Style
 - **Format**: No specific formatter, follow existing 4-space indent style
