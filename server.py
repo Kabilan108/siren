@@ -4,9 +4,9 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Generator, Optional
 
 import torch
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
