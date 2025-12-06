@@ -1,29 +1,14 @@
 services:
   siren:
     build:
+      args:
+        MODE: gpu
       context: .
-      dockerfile: Dockerfile.gpu
     ports:
       - "9934:8000"
     volumes:
       - ${HF_HOME}:/root/.cache/huggingface
     environment:
       - SIREN_API_KEY=${SIREN_API_KEY}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-  siren-cpu:
-    build:
-      context: .
-      dockerfile: Dockerfile.cpu
-    ports:
-      - "9934:8000"
-    volumes:
-      - $USER_DATA/huggingface:/root/.cache/huggingface
-    environment:
-      - SIREN_API_KEY=${SIREN_API_KEY}
+    devices:
+      - nvidia.com/gpu=all
