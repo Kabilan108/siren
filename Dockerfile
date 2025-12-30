@@ -1,7 +1,7 @@
 ARG MODE=gpu
 
 FROM debian:bookworm-slim AS base-cpu
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04 AS base-gpu
+FROM nvidia/cuda:13.0.0-cudnn-runtime-ubuntu22.04 AS base-gpu
 
 FROM base-${MODE} AS base
 
