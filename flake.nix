@@ -23,11 +23,13 @@
     {
       devShell.${system} = pkgs.mkShell {
         buildInputs = with pkgs; [
-          nixpkgs-python.packages.${system}."3.12.10"
-          bun
+          nixpkgs-python.packages.${system}."3.13.2"
+          pkgs.nodejs_20
           uv
           cudaPackages.cudatoolkit
           cudaPackages.cudnn
+          ffmpeg
+          libsndfile
         ];
 
         shellHook = ''
@@ -38,9 +40,17 @@
               pkgs.stdenv.cc.cc
               pkgs.cudaPackages.cudatoolkit
               pkgs.cudaPackages.cudnn
+              pkgs.libsndfile
             ]
           }:/run/opengl-driver/lib:$LD_LIBRARY_PATH
-          unset UV_SYSTEM_PYTHON
+
+          export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          export UV_SYSTEM_PYTHON=1
+
+          if [ ! -f "$HOME/.npm-global/bin/claude" ]; then
+            npm install -g @anthropic-ai/claude-code
+          fi
         '';
       };
     };

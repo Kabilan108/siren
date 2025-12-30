@@ -1,12 +1,14 @@
 [project]
 name = "server"
 version = "0.1.0"
-description = "OpenAI compatible whisper server with a Faster Whisper backend"
-requires-python = ">=3.12"
+description = "OpenAI compatible whisper server with Faster Whisper and Parakeet backends"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi[standard]==0.124.0",
     "faster-whisper==1.2.1",
     "loguru==0.7.3",
+    "nemo-toolkit[asr]>=2.6.0",
+    "onnx==1.18",
     "pydantic==2.12.5",
     "python-multipart==0.0.20",
     "torch==2.9.1",
@@ -15,8 +17,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
-    "ipython-icat>=0.3.1",
+    "ipython-icat>=0.4.1",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
+    "typer>=0.16.0",
     "sqlite-utils>=3.39",
 ]
