@@ -10,7 +10,6 @@ from server import (
     get_whisper_params,
 )
 
-# Constants
 TOKEN = "dev_token"
 VALID_MODEL = "distil-small.en"
 INVALID_MODEL = "invalid-model"
@@ -35,16 +34,6 @@ def mock_whisper_model():
     return mock
 
 
-@pytest.fixture(autouse=True)
-def setup_environment(monkeypatch, tmp_path):
-    """Set up environment variables and config file"""
-    # Directly patch the TOKEN value in server
-    monkeypatch.setattr("server.TOKEN", TOKEN)
-    config_file = tmp_path / "config.json"
-    monkeypatch.setattr("server.CONFIG_FILE", config_file)
-    return config_file
-
-
 def test_list_models_success(client):
     """Test listing available models with valid Bearer token"""
     response = client.get("/v1/models", headers={"Authorization": f"Bearer {TOKEN}"})
@@ -56,14 +45,14 @@ def test_list_models_success(client):
     assert len(data["data"]) > 0
     assert all("id" in model for model in data["data"])
     assert VALID_MODEL in [model["id"] for model in data["data"]]
+    assert any(model["id"].startswith("nvidia/parakeet") for model in data["data"])
 
 
 def test_list_models_unauthorized(client):
     """Test listing models without Bearer token"""
     response = client.get("/v1/models")
 
-    assert response.status_code == 403
-    # With HTTPBearer(auto_error=True), FastAPI returns a 403 with a default error message
+    assert response.status_code == 401
     assert "not authenticated" in response.json()["detail"].lower()
 
 
@@ -71,11 +60,8 @@ def test_list_models_invalid_scheme(client):
     """Test listing models with invalid authentication scheme"""
     response = client.get("/v1/models", headers={"Authorization": f"Basic {TOKEN}"})
 
-    assert response.status_code == 403
-    # When auto_error=True in HTTPBearer, FastAPI's default error message is used
-    # The exact error message can vary, but will indicate invalid credentials
-    detail_lower = response.json()["detail"].lower()
-    assert any(msg in detail_lower for msg in ["invalid", "credentials", "not authenticated"])
+    assert response.status_code == 401
+    assert "not authenticated" in response.json()["detail"].lower()
 
 
 def test_list_models_invalid_token(client):
@@ -89,23 +75,115 @@ def test_list_models_invalid_token(client):
 
 
 @pytest.mark.asyncio
-async def test_transcribe_audio_success(client, mock_whisper_model):
-    """Test audio transcription with valid input"""
-    with patch("server.get_whisper_model", AsyncMock(return_value=mock_whisper_model)):
-        with open("test.wav", "rb") as audio_file:
-            audio_data = audio_file.read()
+async def test_transcribe_audio_success(client, mock_whisper_model, tmp_path):
+    """Test audio transcription with valid input (Whisper path)."""
+    expected_text = (
+        "And so, my fellow Americans, ask not what your country can do for you. "
+        "Ask what you can do for your country."
+    )
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"RIFF$\x00\x00\x00WAVEfmt ")
+
+    with patch(
+        "server.get_transcription_model",
+        AsyncMock(return_value=mock_whisper_model),
+    ) as get_model, patch(
+        "server.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "server.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "server.process_whisper_transcription",
+        AsyncMock(return_value=expected_text),
+    ) as process_whisper:
         response = client.post(
             "/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {TOKEN}"},
-            files={"file": ("test.wav", audio_data, "audio/wav")},
-            params={"model": "distil-large-v3"},  # Explicitly set a valid model
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={"model": "distil-large-v3", "language": "en"},
         )
         assert response.status_code == 200
         data = response.json()
-        assert "text" in data
-        # Check that we get the expected text from our mock
-        expected_text = "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
         assert data["text"] == expected_text
+        get_model.assert_awaited_once()
+        process_whisper.assert_awaited_once()
+        called_path, called_model, called_language = process_whisper.call_args.args
+        assert called_path == str(temp_audio)
+        assert called_model is mock_whisper_model
+        assert called_language == "en"
+
+    assert not temp_audio.exists()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_parakeet_route(client, tmp_path):
+    """Test audio transcription with Parakeet model routes correctly."""
+    temp_audio = tmp_path / "audio.mp3"
+    temp_audio.write_bytes(b"fake")
+    expected_text = "hello parakeet"
+
+    with patch(
+        "server.get_transcription_model",
+        AsyncMock(return_value=MagicMock()),
+    ) as get_model, patch(
+        "server.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "server.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "server.process_parakeet_transcription",
+        AsyncMock(return_value=expected_text),
+    ) as process_parakeet:
+        response = client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.mp3", b"data", "audio/mpeg")},
+            data={"model": "nvidia/parakeet-tdt-0.6b-v2"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["text"] == expected_text
+        get_model.assert_awaited_once()
+        process_parakeet.assert_awaited_once_with(
+            str(temp_audio), get_model.return_value
+        )
+
+    assert not temp_audio.exists()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_cleans_converted_files(client, tmp_path):
+    """Test cleanup for original and converted files."""
+    original = tmp_path / "original.mp3"
+    converted = tmp_path / "converted.wav"
+    original.write_bytes(b"fake")
+    converted.write_bytes(b"converted")
+
+    with patch(
+        "server.get_transcription_model",
+        AsyncMock(return_value=MagicMock()),
+    ), patch(
+        "server.save_upload_file",
+        AsyncMock(return_value=str(original)),
+    ), patch(
+        "server.ensure_16k_wav",
+        AsyncMock(return_value=str(converted)),
+    ), patch(
+        "server.process_whisper_transcription",
+        AsyncMock(return_value="ok"),
+    ):
+        response = client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.mp3", b"data", "audio/mpeg")},
+            data={"model": "distil-large-v3", "language": "en"},
+        )
+        assert response.status_code == 200
+
+    assert not original.exists()
+    assert not converted.exists()
 
 
 @pytest.mark.asyncio
@@ -137,7 +215,7 @@ def test_transcribe_audio_unauthorized(client):
         files={"file": ("test.wav", audio_data, "audio/wav")},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 401
     assert "not authenticated" in response.json()["detail"].lower()
 
 
