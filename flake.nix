@@ -30,6 +30,7 @@
           cudaPackages.cudnn
           ffmpeg
           libsndfile
+          pkgs.stdenv.cc.cc.lib
         ];
 
         shellHook = ''
@@ -38,6 +39,7 @@
             pkgs.lib.makeLibraryPath [
               pkgs.zlib
               pkgs.stdenv.cc.cc
+              pkgs.stdenv.cc.cc.lib
               pkgs.cudaPackages.cudatoolkit
               pkgs.cudaPackages.cudnn
               pkgs.libsndfile

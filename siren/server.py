@@ -25,7 +25,7 @@ logger = logging.getLogger("uvicorn")
 
 TOKEN = os.environ.get("SIREN_API_KEY", "dev_token")
 CONFIG_FILE = Path("~/config.json").expanduser()
-DEFAULT_MODEL = "distil-small.en"
+DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
 
 PARAKEET_MODELS = [
     "nvidia/parakeet-tdt-0.6b-v2",
