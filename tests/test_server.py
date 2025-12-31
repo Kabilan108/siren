@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from server import (
+from siren.server import (
     WhisperModel,
     app,
     get_whisper_params,
@@ -85,16 +85,16 @@ async def test_transcribe_audio_success(client, mock_whisper_model, tmp_path):
     temp_audio.write_bytes(b"RIFF$\x00\x00\x00WAVEfmt ")
 
     with patch(
-        "server.get_transcription_model",
+        "siren.server.get_transcription_model",
         AsyncMock(return_value=mock_whisper_model),
     ) as get_model, patch(
-        "server.save_upload_file",
+        "siren.server.save_upload_file",
         AsyncMock(return_value=str(temp_audio)),
     ), patch(
-        "server.ensure_16k_wav",
+        "siren.server.ensure_16k_wav",
         AsyncMock(return_value=str(temp_audio)),
     ), patch(
-        "server.process_whisper_transcription",
+        "siren.server.process_whisper_transcription",
         AsyncMock(return_value=expected_text),
     ) as process_whisper:
         response = client.post(
@@ -124,16 +124,16 @@ async def test_transcribe_audio_parakeet_route(client, tmp_path):
     expected_text = "hello parakeet"
 
     with patch(
-        "server.get_transcription_model",
+        "siren.server.get_transcription_model",
         AsyncMock(return_value=MagicMock()),
     ) as get_model, patch(
-        "server.save_upload_file",
+        "siren.server.save_upload_file",
         AsyncMock(return_value=str(temp_audio)),
     ), patch(
-        "server.ensure_16k_wav",
+        "siren.server.ensure_16k_wav",
         AsyncMock(return_value=str(temp_audio)),
     ), patch(
-        "server.process_parakeet_transcription",
+        "siren.server.process_parakeet_transcription",
         AsyncMock(return_value=expected_text),
     ) as process_parakeet:
         response = client.post(
@@ -162,16 +162,16 @@ async def test_transcribe_audio_cleans_converted_files(client, tmp_path):
     converted.write_bytes(b"converted")
 
     with patch(
-        "server.get_transcription_model",
+        "siren.server.get_transcription_model",
         AsyncMock(return_value=MagicMock()),
     ), patch(
-        "server.save_upload_file",
+        "siren.server.save_upload_file",
         AsyncMock(return_value=str(original)),
     ), patch(
-        "server.ensure_16k_wav",
+        "siren.server.ensure_16k_wav",
         AsyncMock(return_value=str(converted)),
     ), patch(
-        "server.process_whisper_transcription",
+        "siren.server.process_whisper_transcription",
         AsyncMock(return_value="ok"),
     ):
         response = client.post(

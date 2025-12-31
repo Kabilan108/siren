@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server import ensure_16k_wav, is_16khz_wav, is_parakeet_model
+from siren.server import ensure_16k_wav, is_16khz_wav, is_parakeet_model
 
 
 def write_wav(path, sample_rate=16000, channels=1):
@@ -36,7 +36,7 @@ def test_is_16khz_wav_false(tmp_path):
 async def test_ensure_16k_wav_skips_conversion(tmp_path):
     audio_path = tmp_path / "audio.wav"
     write_wav(audio_path, sample_rate=16000, channels=1)
-    with patch("server.convert_to_16k_wav", AsyncMock()) as convert:
+    with patch("siren.server.convert_to_16k_wav", AsyncMock()) as convert:
         result = await ensure_16k_wav(str(audio_path))
         assert result == str(audio_path)
         convert.assert_not_awaited()
@@ -48,7 +48,7 @@ async def test_ensure_16k_wav_converts(tmp_path):
     converted_path = tmp_path / "converted.wav"
     write_wav(audio_path, sample_rate=8000, channels=1)
     with patch(
-        "server.convert_to_16k_wav", AsyncMock(return_value=str(converted_path))
+        "siren.server.convert_to_16k_wav", AsyncMock(return_value=str(converted_path))
     ) as convert:
         result = await ensure_16k_wav(str(audio_path))
         assert result == str(converted_path)

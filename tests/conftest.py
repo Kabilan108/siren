@@ -1,6 +1,6 @@
 import pytest
 
-import server
+from siren import server
 
 TOKEN = "dev_token"
 

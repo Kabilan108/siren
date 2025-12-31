@@ -1,5 +1,9 @@
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
+
 [project]
-name = "server"
+name = "siren"
 version = "0.1.0"
 description = "OpenAI compatible whisper server with Faster Whisper and Parakeet backends"
 requires-python = ">=3.13,<3.14"
@@ -23,3 +27,7 @@ dev = [
     "typer>=0.16.0",
     "sqlite-utils>=3.39",
 ]
+
+[tool.uv.build-backend]
+module-name = "siren"
+module-root = ""
