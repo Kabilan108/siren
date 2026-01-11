@@ -31,6 +31,15 @@ class StreamingConfig:
         return self.samples_per_frame * self.chunk_frames
 
 
+def _common_prefix_len(s1: str, s2: str) -> int:
+    """Find length of longest common prefix between two strings."""
+    min_len = min(len(s1), len(s2))
+    for i in range(min_len):
+        if s1[i] != s2[i]:
+            return i
+    return min_len
+
+
 @dataclass
 class PartialResult:
     """A partial transcription result."""
@@ -191,9 +200,9 @@ class StreamingSession:
                 else:
                     new_text = str(item)
 
-                # Track stability: the previous full transcript is stable
-                # Only the new tokens may change
-                stable_len = len(self._full_transcript)
+                # Calculate stable_len as longest common prefix with previous
+                # This handles cases where model corrects earlier text
+                stable_len = _common_prefix_len(self._full_transcript, new_text)
                 self._full_transcript = new_text
 
                 return {
@@ -223,8 +232,8 @@ class StreamingSession:
                     text = str(item)
                 else:
                     text = str(item)
-                # Track what's stable (previous text length)
-                stable_len = len(self._full_transcript)
+                # Calculate stable_len as longest common prefix with previous
+                stable_len = _common_prefix_len(self._full_transcript, text)
                 self._full_transcript = text
                 return {"text": text, "stable_len": stable_len}
 
