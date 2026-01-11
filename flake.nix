@@ -45,13 +45,9 @@
               pkgs.libsndfile
             ]
           }:/run/opengl-driver/lib:$LD_LIBRARY_PATH
-
-          export NPM_CONFIG_PREFIX="$HOME/.npm-global"
-          export PATH="$HOME/.npm-global/bin:$PATH"
-          export UV_SYSTEM_PYTHON=1
-
-          if [ ! -f "$HOME/.npm-global/bin/claude" ]; then
-            npm install -g @anthropic-ai/claude-code
+          export UV_SYSTEM_PYTHON=0
+          if [ -f "$PWD/.venv/bin/activate" ]; then
+            source "$PWD/.venv/bin/activate"
           fi
         '';
       };

@@ -9,7 +9,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import torch
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
@@ -17,9 +27,15 @@ from pydantic import BaseModel
 warnings.filterwarnings("ignore", module="nemo")
 warnings.filterwarnings("ignore", message=".*torchaudio.*")
 
-import nemo.collections.asr as nemo_asr
+import nemo.collections.asr as nemo_asr  # noqa: E402
 
 # Suppress NeMo warnings for cleaner output
+
+from siren.streaming import (  # noqa: E402
+    StreamingConfig,
+    create_streaming_session,
+    load_nemotron_model,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -34,6 +50,10 @@ PARAKEET_MODELS = [
     "nvidia/parakeet-ctc-0.6b",
 ]
 
+NEMOTRON_MODELS = [
+    "nvidia/nemotron-speech-streaming-en-0.6b",
+]
+
 token_header = HTTPBearer(auto_error=True)
 
 current_model: WhisperModel | nemo_asr.models.ASRModel | None = None
@@ -43,6 +63,10 @@ model_ready = asyncio.Event()
 model_loading_task: asyncio.Task | None = None
 model_loading_target: str | None = None
 model_load_error: Exception | None = None
+
+# Global streaming model (separate from batch model)
+streaming_model: nemo_asr.models.ASRModel | None = None
+streaming_model_lock = asyncio.Lock()
 
 
 class TranscriptionResponse(BaseModel):
@@ -124,7 +148,7 @@ async def lifespan(app: FastAPI):
 
 
 def get_available_models() -> list[ModelInfo]:
-    """Get available transcription models (Whisper + Parakeet)."""
+    """Get available transcription models (Whisper + Parakeet + Nemotron)."""
     # Faster Whisper models
     whisper_models = [
         "tiny.en",
@@ -146,14 +170,19 @@ def get_available_models() -> list[ModelInfo]:
         "large-v3-turbo",
         "turbo",
     ]
-    # Combine with Parakeet models
-    all_models = whisper_models + PARAKEET_MODELS
+    # Combine with Parakeet and Nemotron models
+    all_models = whisper_models + PARAKEET_MODELS + NEMOTRON_MODELS
     return [ModelInfo(id=m) for m in all_models]
 
 
 def is_parakeet_model(model_name: str) -> bool:
     """Check if a model name is a Parakeet model."""
     return model_name in PARAKEET_MODELS or model_name.startswith("nvidia/parakeet")
+
+
+def is_nemotron_model(model_name: str) -> bool:
+    """Check if a model name is a Nemotron streaming model."""
+    return model_name in NEMOTRON_MODELS or "nemotron-speech-streaming" in model_name
 
 
 def save_config(model_name: str):
@@ -375,6 +404,28 @@ app = FastAPI(
 )
 
 
+async def get_streaming_model():
+    """Get or load the Nemotron streaming model."""
+    global streaming_model
+
+    async with streaming_model_lock:
+        if streaming_model is None:
+            loop = asyncio.get_running_loop()
+            streaming_model = await loop.run_in_executor(
+                None,
+                load_nemotron_model,
+                "nvidia/nemotron-speech-streaming-en-0.6b",
+            )
+        return streaming_model
+
+
+def verify_token_value(token: str | None) -> bool:
+    """Verify a token value directly (not as a dependency)."""
+    if not token:
+        return False
+    return token == TOKEN
+
+
 @app.get(
     "/v1/models",
     response_model=ModelsResponse,
@@ -452,6 +503,131 @@ async def transcribe_audio(
         for path in {converted_path, original_path}:
             if path and os.path.exists(path):
                 os.unlink(path)
+
+
+@app.websocket("/ws/transcribe")
+async def websocket_transcribe(websocket: WebSocket):
+    """WebSocket endpoint for streaming transcription."""
+    await websocket.accept()
+
+    # Authenticate
+    auth_token = websocket.query_params.get("token")
+    if not auth_token:
+        # Try to get token from first message
+        try:
+            first_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+            if first_msg.get("type") == "auth":
+                auth_token = first_msg.get("token")
+        except asyncio.TimeoutError:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": "Authentication timeout",
+                    "code": "AUTH_FAILED",
+                }
+            )
+            await websocket.close()
+            return
+
+    if not verify_token_value(auth_token):
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "Invalid authentication token",
+                "code": "AUTH_FAILED",
+            }
+        )
+        await websocket.close()
+        return
+
+    # Get model
+    try:
+        model = await get_streaming_model()
+    except Exception as e:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"Failed to load model: {e}",
+                "code": "MODEL_ERROR",
+            }
+        )
+        await websocket.close()
+        return
+
+    # Create session with default config
+    config = StreamingConfig()
+    session = create_streaming_session(model, config)
+
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            msg_type = msg.get("type")
+
+            if msg_type == "config":
+                # Update config (must be before audio)
+                if "chunk_frames" in msg:
+                    config = StreamingConfig(chunk_frames=msg["chunk_frames"])
+                    session = create_streaming_session(model, config)
+
+            elif msg_type == "audio":
+                # Add audio and process
+                try:
+                    session.add_audio(msg["data"])
+                except ValueError as e:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": str(e),
+                            "code": "INVALID_AUDIO",
+                        }
+                    )
+                    continue
+                async for partial in session.process_chunks():
+                    await websocket.send_json(
+                        {
+                            "type": "partial",
+                            "text": partial.text,
+                            "stable_len": partial.stable_len,
+                            "seq": partial.seq,
+                        }
+                    )
+
+            elif msg_type == "end":
+                # Finalize and send final result
+                final = await session.finalize()
+                await websocket.send_json(
+                    {
+                        "type": "final",
+                        "text": final.text,
+                        "seq": final.seq,
+                    }
+                )
+                break
+
+            else:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"Unknown message type: {msg_type}",
+                        "code": "INVALID_MESSAGE",
+                    }
+                )
+
+    except WebSocketDisconnect:
+        pass  # Client disconnected, clean up silently
+    except Exception as e:
+        try:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": str(e),
+                    "code": "INTERNAL_ERROR",
+                }
+            )
+        except Exception:
+            pass  # Connection may already be closed
+    finally:
+        await websocket.close()
 
 
 if __name__ == "__main__":

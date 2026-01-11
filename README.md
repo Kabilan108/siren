@@ -35,3 +35,57 @@ Tests are run automatically via GitHub Actions. To run locally:
 ```bash
 uv run pytest
 ```
+
+## Streaming Transcription
+
+Siren supports real-time streaming transcription via WebSocket.
+
+### Endpoint
+
+```
+ws://<host>:8000/ws/transcribe?token=<api_key>
+```
+
+### Protocol
+
+Send audio chunks as base64-encoded 16kHz mono PCM:
+
+```json
+{"type": "audio", "data": "<base64 PCM>", "seq": 1}
+```
+
+Receive partial transcriptions:
+
+```json
+{"type": "partial", "text": "hello world", "stable_len": 6, "seq": 1}
+```
+
+The `stable_len` field indicates how many characters from the start are finalized.
+
+Signal end of audio:
+
+```json
+{"type": "end"}
+```
+
+Receive final transcription:
+
+```json
+{"type": "final", "text": "Hello world.", "seq": 2}
+```
+
+### Latency Configuration
+
+Send a config message before audio to adjust latency:
+
+```json
+{"type": "config", "chunk_frames": 7}
+```
+
+| chunk_frames | Latency |
+|--------------|---------|
+| 2 | 160ms |
+| 7 | 560ms (default) |
+| 14 | 1.12s |
+
+Lower latency = faster response but potentially less accurate.

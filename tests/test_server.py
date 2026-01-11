@@ -84,19 +84,24 @@ async def test_transcribe_audio_success(client, mock_whisper_model, tmp_path):
     temp_audio = tmp_path / "audio.wav"
     temp_audio.write_bytes(b"RIFF$\x00\x00\x00WAVEfmt ")
 
-    with patch(
-        "siren.server.get_transcription_model",
-        AsyncMock(return_value=mock_whisper_model),
-    ) as get_model, patch(
-        "siren.server.save_upload_file",
-        AsyncMock(return_value=str(temp_audio)),
-    ), patch(
-        "siren.server.ensure_16k_wav",
-        AsyncMock(return_value=str(temp_audio)),
-    ), patch(
-        "siren.server.process_whisper_transcription",
-        AsyncMock(return_value=expected_text),
-    ) as process_whisper:
+    with (
+        patch(
+            "siren.server.get_transcription_model",
+            AsyncMock(return_value=mock_whisper_model),
+        ) as get_model,
+        patch(
+            "siren.server.save_upload_file",
+            AsyncMock(return_value=str(temp_audio)),
+        ),
+        patch(
+            "siren.server.ensure_16k_wav",
+            AsyncMock(return_value=str(temp_audio)),
+        ),
+        patch(
+            "siren.server.process_whisper_transcription",
+            AsyncMock(return_value=expected_text),
+        ) as process_whisper,
+    ):
         response = client.post(
             "/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {TOKEN}"},
@@ -123,19 +128,24 @@ async def test_transcribe_audio_parakeet_route(client, tmp_path):
     temp_audio.write_bytes(b"fake")
     expected_text = "hello parakeet"
 
-    with patch(
-        "siren.server.get_transcription_model",
-        AsyncMock(return_value=MagicMock()),
-    ) as get_model, patch(
-        "siren.server.save_upload_file",
-        AsyncMock(return_value=str(temp_audio)),
-    ), patch(
-        "siren.server.ensure_16k_wav",
-        AsyncMock(return_value=str(temp_audio)),
-    ), patch(
-        "siren.server.process_parakeet_transcription",
-        AsyncMock(return_value=expected_text),
-    ) as process_parakeet:
+    with (
+        patch(
+            "siren.server.get_transcription_model",
+            AsyncMock(return_value=MagicMock()),
+        ) as get_model,
+        patch(
+            "siren.server.save_upload_file",
+            AsyncMock(return_value=str(temp_audio)),
+        ),
+        patch(
+            "siren.server.ensure_16k_wav",
+            AsyncMock(return_value=str(temp_audio)),
+        ),
+        patch(
+            "siren.server.process_parakeet_transcription",
+            AsyncMock(return_value=expected_text),
+        ) as process_parakeet,
+    ):
         response = client.post(
             "/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {TOKEN}"},
@@ -161,18 +171,23 @@ async def test_transcribe_audio_cleans_converted_files(client, tmp_path):
     original.write_bytes(b"fake")
     converted.write_bytes(b"converted")
 
-    with patch(
-        "siren.server.get_transcription_model",
-        AsyncMock(return_value=MagicMock()),
-    ), patch(
-        "siren.server.save_upload_file",
-        AsyncMock(return_value=str(original)),
-    ), patch(
-        "siren.server.ensure_16k_wav",
-        AsyncMock(return_value=str(converted)),
-    ), patch(
-        "siren.server.process_whisper_transcription",
-        AsyncMock(return_value="ok"),
+    with (
+        patch(
+            "siren.server.get_transcription_model",
+            AsyncMock(return_value=MagicMock()),
+        ),
+        patch(
+            "siren.server.save_upload_file",
+            AsyncMock(return_value=str(original)),
+        ),
+        patch(
+            "siren.server.ensure_16k_wav",
+            AsyncMock(return_value=str(converted)),
+        ),
+        patch(
+            "siren.server.process_whisper_transcription",
+            AsyncMock(return_value="ok"),
+        ),
     ):
         response = client.post(
             "/v1/audio/transcriptions",
