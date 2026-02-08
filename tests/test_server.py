@@ -146,9 +146,11 @@ async def test_transcribe_audio_parakeet_route(client, tmp_path):
         data = response.json()
         assert data["text"] == expected_text
         get_model.assert_awaited_once()
-        process_parakeet.assert_awaited_once_with(
-            str(temp_audio), get_model.return_value
-        )
+        process_parakeet.assert_awaited_once()
+        called_path, called_model = process_parakeet.call_args.args
+        assert called_path == str(temp_audio)
+        assert called_model is get_model.return_value
+        assert "request_id" in process_parakeet.call_args.kwargs
 
     assert not temp_audio.exists()
 

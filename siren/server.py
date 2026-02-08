@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import tempfile
+import time
+import uuid
 import warnings
 import wave
 from contextlib import asynccontextmanager
@@ -43,6 +45,42 @@ model_ready = asyncio.Event()
 model_loading_task: asyncio.Task | None = None
 model_loading_target: str | None = None
 model_load_error: Exception | None = None
+
+
+def log_event(level: int, event: str, **fields: object) -> None:
+    payload = {"event": event, **fields}
+    logger.log(level, json.dumps(payload, default=str))
+
+
+def get_wav_info(audio_path: str) -> dict[str, float | int]:
+    try:
+        with wave.open(audio_path, "rb") as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            duration = frames / rate if rate else 0.0
+            return {
+                "audio_frames": frames,
+                "audio_sample_rate": rate,
+                "audio_channels": channels,
+                "audio_duration_sec": duration,
+            }
+    except (wave.Error, EOFError) as exc:
+        log_event(logging.WARNING, "audio_info_failed", audio_path=audio_path, error=str(exc))
+        return {}
+
+
+def get_cuda_stats() -> dict[str, int]:
+    if not torch.cuda.is_available():
+        return {}
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    return {
+        "cuda_allocated_bytes": int(torch.cuda.memory_allocated()),
+        "cuda_reserved_bytes": int(torch.cuda.memory_reserved()),
+        "cuda_max_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+        "cuda_free_bytes": int(free_bytes),
+        "cuda_total_bytes": int(total_bytes),
+    }
 
 
 class TranscriptionResponse(BaseModel):
@@ -243,10 +281,29 @@ async def process_whisper_transcription(
 async def process_parakeet_transcription(
     audio_path: str,
     model: nemo_asr.models.ASRModel,
+    request_id: str | None = None,
 ) -> str:
     """Process transcription with Parakeet model."""
     loop = asyncio.get_running_loop()
+    audio_info = get_wav_info(audio_path)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
     output = await loop.run_in_executor(None, lambda: model.transcribe([audio_path]))
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+    log_event(
+        logging.INFO,
+        "parakeet_transcribe",
+        request_id=request_id,
+        latency_ms=elapsed_ms,
+        **audio_info,
+        **get_cuda_stats(),
+    )
     if not output:
         return ""
     return output[0].text
@@ -412,6 +469,8 @@ async def transcribe_audio(
     """OpenAI compatible transcription endpoint"""
     original_path = None
     converted_path = None
+    request_id = uuid.uuid4().hex
+    request_start = time.perf_counter()
     try:
         transcription_model = await get_transcription_model(model)
         target_model = model if model is not None else current_model_name
@@ -421,6 +480,17 @@ async def transcribe_audio(
         if audio_path != original_path:
             converted_path = audio_path
         audio_size = os.path.getsize(original_path)
+        audio_info = get_wav_info(audio_path)
+        log_event(
+            logging.INFO,
+            "transcribe_request",
+            request_id=request_id,
+            model=target_model,
+            language=language,
+            filename=file.filename,
+            audio_bytes=audio_size,
+            **audio_info,
+        )
         logger.info(
             f"Starting transcription for file: {file.filename}, size: {audio_size} bytes, model: {target_model}, language: {language}"
         )
@@ -428,13 +498,22 @@ async def transcribe_audio(
         # Process transcription based on model type
         if is_parakeet_model(target_model):
             full_text = await process_parakeet_transcription(
-                audio_path, transcription_model
+                audio_path, transcription_model, request_id=request_id
             )
         else:
             full_text = await process_whisper_transcription(
                 audio_path, transcription_model, language
             )
 
+        total_ms = int((time.perf_counter() - request_start) * 1000)
+        log_event(
+            logging.INFO,
+            "transcribe_complete",
+            request_id=request_id,
+            model=target_model,
+            latency_ms=total_ms,
+            text_length=len(full_text),
+        )
         logger.info(
             f"Transcription completed. Text length: {len(full_text)} characters"
         )
@@ -442,6 +521,12 @@ async def transcribe_audio(
     except HTTPException:
         raise
     except Exception as e:
+        log_event(
+            logging.ERROR,
+            "transcribe_error",
+            request_id=request_id,
+            error=str(e),
+        )
         logger.error(f"Transcription error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
