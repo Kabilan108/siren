@@ -8,13 +8,16 @@ import uuid
 import warnings
 import wave
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
+from pydub import AudioSegment, silence
 
 warnings.filterwarnings("ignore", module="nemo")
 warnings.filterwarnings("ignore", message=".*torchaudio.*")
@@ -83,6 +86,145 @@ def get_cuda_stats() -> dict[str, int]:
     }
 
 
+@dataclass
+class StreamingConfig:
+    sample_rate: int = 16000
+    channels: int = 1
+    sample_width: int = 2
+    min_silence_ms: int = 900
+    trailing_silence_ms: int = 200
+    silence_thresh_db: int = -40
+    max_segment_sec: int = 90
+    cap_grace_ms: int = 1500
+    overlap_ms: int = 400
+    use_timestamps_on_cap: bool = True
+
+
+@dataclass
+class StreamingState:
+    buffer: bytearray
+    cap_deadline: float | None
+
+
+def bytes_per_ms(config: StreamingConfig) -> int:
+    return int(config.sample_rate * config.sample_width * config.channels / 1000)
+
+
+def buffer_duration_ms(buffer: bytearray, config: StreamingConfig) -> float:
+    b_per_ms = bytes_per_ms(config)
+    if b_per_ms == 0:
+        return 0.0
+    return len(buffer) / b_per_ms
+
+
+def detect_trailing_silence_cut(
+    buffer: bytearray, config: StreamingConfig
+) -> int | None:
+    b_per_ms = bytes_per_ms(config)
+    if b_per_ms == 0:
+        return None
+    if len(buffer) < config.min_silence_ms * b_per_ms:
+        return None
+    segment = AudioSegment(
+        data=bytes(buffer),
+        sample_width=config.sample_width,
+        frame_rate=config.sample_rate,
+        channels=config.channels,
+    )
+    silence_ranges = silence.detect_silence(
+        segment,
+        min_silence_len=config.min_silence_ms,
+        silence_thresh=config.silence_thresh_db,
+    )
+    if not silence_ranges:
+        return None
+    end_ms = len(segment)
+    last_start, last_end = silence_ranges[-1]
+    if end_ms - last_end <= config.trailing_silence_ms:
+        return last_end
+    return None
+
+
+def extract_word_timestamps(entry: object) -> list[dict] | None:
+    candidates = [
+        "timestamps",
+        "word_timestamps",
+        "words",
+        "word_ts",
+        "word_timestamp",
+    ]
+    for name in candidates:
+        value = getattr(entry, name, None)
+        if not value:
+            continue
+        if isinstance(value, dict):
+            for key in ("words", "word", "word_timestamps"):
+                inner = value.get(key)
+                if isinstance(inner, list):
+                    return inner
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def normalize_word_timestamps(
+    words: list[dict], duration_ms: float
+) -> list[dict]:
+    if not words:
+        return []
+    max_end = 0.0
+    for w in words:
+        end = w.get("end") if isinstance(w, dict) else None
+        if isinstance(end, (int, float)) and end > max_end:
+            max_end = float(end)
+    if max_end <= 0:
+        return []
+    if max_end <= duration_ms / 1000.0 + 1.0:
+        scale = 1000.0
+    else:
+        scale = 1.0
+    normalized: list[dict] = []
+    for w in words:
+        if not isinstance(w, dict):
+            continue
+        start = w.get("start")
+        end = w.get("end")
+        word = w.get("word") or w.get("text") or ""
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            normalized.append(
+                {
+                    "start_ms": float(start) * scale,
+                    "end_ms": float(end) * scale,
+                    "word": str(word),
+                }
+            )
+    return normalized
+
+
+def trim_text_by_timestamp(
+    words: list[dict], cut_ms: int, fallback_text: str
+) -> str:
+    if not words:
+        return fallback_text
+    kept = [w["word"] for w in words if w["end_ms"] <= cut_ms and w["word"]]
+    if not kept:
+        return fallback_text
+    return " ".join(kept).strip()
+
+
+def write_pcm_to_wav(
+    pcm_bytes: bytes, config: StreamingConfig
+) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+        output_path = temp_file.name
+    with wave.open(output_path, "wb") as wav_file:
+        wav_file.setnchannels(config.channels)
+        wav_file.setsampwidth(config.sample_width)
+        wav_file.setframerate(config.sample_rate)
+        wav_file.writeframes(pcm_bytes)
+    return output_path
+
+
 class TranscriptionResponse(BaseModel):
     text: str
 
@@ -135,6 +277,17 @@ def verify_token(
         )
 
     return credentials.credentials
+
+
+def verify_websocket_token(websocket: WebSocket) -> None:
+    auth_header = websocket.headers.get("Authorization", "")
+    token = None
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    if token is None:
+        token = websocket.query_params.get("token")
+    if token != TOKEN:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
 @asynccontextmanager
@@ -307,6 +460,53 @@ async def process_parakeet_transcription(
     if not output:
         return ""
     return output[0].text
+
+
+async def transcribe_parakeet_segment(
+    audio_path: str,
+    model: nemo_asr.models.ASRModel,
+    request_id: str | None,
+    use_timestamps: bool,
+) -> tuple[str, list[dict] | None]:
+    loop = asyncio.get_running_loop()
+    audio_info = get_wav_info(audio_path)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
+
+    def _run_transcribe():
+        if use_timestamps:
+            try:
+                return model.transcribe([audio_path], timestamps=True)
+            except TypeError:
+                return model.transcribe([audio_path])
+        return model.transcribe([audio_path])
+
+    output = await loop.run_in_executor(None, _run_transcribe)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+    log_event(
+        logging.INFO,
+        "parakeet_stream_transcribe",
+        request_id=request_id,
+        latency_ms=elapsed_ms,
+        **audio_info,
+        **get_cuda_stats(),
+        timestamps=use_timestamps,
+    )
+    if not output:
+        return "", None
+    entry = output[0]
+    text = getattr(entry, "text", str(entry))
+    words = extract_word_timestamps(entry) if use_timestamps else None
+    if words:
+        duration_ms = audio_info.get("audio_duration_sec", 0) * 1000
+        words = normalize_word_timestamps(words, duration_ms)
+    return text, words
 
 
 def load_model(model_name: str) -> WhisperModel | nemo_asr.models.ASRModel:
@@ -537,6 +737,174 @@ async def transcribe_audio(
         for path in {converted_path, original_path}:
             if path and os.path.exists(path):
                 os.unlink(path)
+
+
+def apply_streaming_overrides(config: StreamingConfig, payload: dict) -> None:
+    for key in (
+        "sample_rate",
+        "channels",
+        "sample_width",
+        "min_silence_ms",
+        "trailing_silence_ms",
+        "silence_thresh_db",
+        "max_segment_sec",
+        "cap_grace_ms",
+        "overlap_ms",
+        "use_timestamps_on_cap",
+    ):
+        if key in payload:
+            setattr(config, key, payload[key])
+
+
+@app.websocket("/v1/audio/stream")
+async def stream_transcriptions(websocket: WebSocket):
+    try:
+        verify_websocket_token(websocket)
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+
+    config = StreamingConfig()
+    state = StreamingState(buffer=bytearray(), cap_deadline=None)
+    request_id = uuid.uuid4().hex
+
+    for key in (
+        "sample_rate",
+        "channels",
+        "sample_width",
+        "min_silence_ms",
+        "trailing_silence_ms",
+        "silence_thresh_db",
+        "max_segment_sec",
+        "cap_grace_ms",
+        "overlap_ms",
+    ):
+        if key in websocket.query_params:
+            try:
+                value = int(websocket.query_params[key])
+                setattr(config, key, value)
+            except ValueError:
+                continue
+
+    model_param = websocket.query_params.get("model")
+    model = await get_transcription_model(model_param)
+    target_model = model_param if model_param is not None else current_model_name
+    if not is_parakeet_model(target_model or ""):
+        await websocket.send_text(
+            json.dumps(
+                {"type": "error", "message": "streaming only supports Parakeet models"}
+            )
+        )
+        await websocket.close(code=1003)
+        return
+
+    async def emit_segment(
+        segment_bytes: bytes, cut_ms: int, forced: bool
+    ) -> bool:
+        audio_path = write_pcm_to_wav(segment_bytes, config)
+        try:
+            use_timestamps = forced and config.use_timestamps_on_cap
+            text, words = await transcribe_parakeet_segment(
+                audio_path, model, request_id=request_id, use_timestamps=use_timestamps
+            )
+            if forced and words:
+                text = trim_text_by_timestamp(words, cut_ms, text)
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "segment",
+                        "text": text,
+                        "forced": forced,
+                        "cut_ms": cut_ms,
+                    }
+                )
+            )
+            return bool(words)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+    async def process_buffer(flush: bool = False) -> None:
+        while True:
+            duration_ms = buffer_duration_ms(state.buffer, config)
+            if duration_ms <= 0:
+                state.cap_deadline = None
+                return
+
+            cut_ms = None
+            forced = False
+
+            if not flush:
+                cut_ms = detect_trailing_silence_cut(state.buffer, config)
+
+            if cut_ms is None:
+                max_ms = config.max_segment_sec * 1000
+                if duration_ms >= max_ms:
+                    now = time.monotonic()
+                    if state.cap_deadline is None:
+                        state.cap_deadline = now + config.cap_grace_ms / 1000.0
+                    if flush or now >= state.cap_deadline:
+                        cut_ms = int(max_ms)
+                        forced = True
+                else:
+                    state.cap_deadline = None
+
+            if cut_ms is None:
+                if flush:
+                    cut_ms = int(duration_ms)
+                    forced = True
+                else:
+                    return
+
+            b_per_ms = bytes_per_ms(config)
+            cut_bytes = int(cut_ms * b_per_ms)
+            if cut_bytes <= 0 or cut_bytes > len(state.buffer):
+                return
+
+            segment_bytes = bytes(state.buffer[:cut_bytes])
+            tail = bytes(state.buffer[cut_bytes:])
+
+            state.cap_deadline = None
+
+            timestamps_used = await emit_segment(segment_bytes, cut_ms, forced)
+
+            if forced and config.overlap_ms > 0 and not timestamps_used:
+                overlap_bytes = int(config.overlap_ms * b_per_ms)
+                prefix = segment_bytes[-overlap_bytes:] if overlap_bytes else b""
+                state.buffer = bytearray(prefix + tail)
+            else:
+                state.buffer = bytearray(tail)
+
+            if not state.buffer:
+                return
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"] is not None:
+                chunk = message["bytes"]
+                if chunk:
+                    state.buffer.extend(chunk)
+                    await process_buffer(flush=False)
+            elif "text" in message and message["text"] is not None:
+                text = message["text"].strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    payload = {}
+                if payload.get("type") == "config":
+                    apply_streaming_overrides(config, payload)
+                    await websocket.send_text(json.dumps({"type": "config", "ok": True}))
+                elif payload.get("type") == "end" or text == "end":
+                    await process_buffer(flush=True)
+                    await websocket.close()
+                    return
+    except WebSocketDisconnect:
+        return
 
 
 if __name__ == "__main__":
