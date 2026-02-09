@@ -145,6 +145,44 @@ def detect_trailing_silence_cut(
     return None
 
 
+def buffer_has_nonsilent_audio(
+    buffer: bytearray, config: StreamingConfig
+) -> bool:
+    if not buffer:
+        return False
+    segment = AudioSegment(
+        data=bytes(buffer),
+        sample_width=config.sample_width,
+        frame_rate=config.sample_rate,
+        channels=config.channels,
+    )
+    nonsilent = silence.detect_nonsilent(
+        segment,
+        min_silence_len=config.trailing_silence_ms,
+        silence_thresh=config.silence_thresh_db,
+    )
+    return bool(nonsilent)
+
+
+def segment_has_nonsilent_audio(
+    segment_bytes: bytes, config: StreamingConfig
+) -> bool:
+    if not segment_bytes:
+        return False
+    segment = AudioSegment(
+        data=segment_bytes,
+        sample_width=config.sample_width,
+        frame_rate=config.sample_rate,
+        channels=config.channels,
+    )
+    nonsilent = silence.detect_nonsilent(
+        segment,
+        min_silence_len=config.trailing_silence_ms,
+        silence_thresh=config.silence_thresh_db,
+    )
+    return bool(nonsilent)
+
+
 def extract_word_timestamps(entry: object) -> list[dict] | None:
     candidates = [
         "timestamps",
@@ -827,6 +865,13 @@ async def stream_transcriptions(websocket: WebSocket):
                 os.unlink(audio_path)
 
     async def process_buffer(flush: bool = False) -> None:
+        if flush and state.buffer and not buffer_has_nonsilent_audio(
+            state.buffer, config
+        ):
+            state.buffer.clear()
+            state.cap_deadline = None
+            return
+        min_flush_ms = 80
         while True:
             duration_ms = buffer_duration_ms(state.buffer, config)
             if duration_ms <= 0:
@@ -868,12 +913,39 @@ async def stream_transcriptions(websocket: WebSocket):
 
             state.cap_deadline = None
 
+            if forced and cut_ms < 200:
+                log_event(
+                    logging.INFO,
+                    "parakeet_stream_cut",
+                    request_id=request_id,
+                    cut_ms=cut_ms,
+                    duration_ms=int(duration_ms),
+                    buffer_bytes=len(state.buffer),
+                    flush=flush,
+                    max_segment_sec=config.max_segment_sec,
+                    min_silence_ms=config.min_silence_ms,
+                    overlap_ms=config.overlap_ms,
+                )
+
+            if flush and forced and cut_ms < min_flush_ms:
+                state.buffer = bytearray(tail)
+                return
+
+            if flush and forced and not segment_has_nonsilent_audio(
+                segment_bytes, config
+            ):
+                state.buffer = bytearray(tail)
+                return
+
             timestamps_used = await emit_segment(segment_bytes, cut_ms, forced)
 
-            if forced and config.overlap_ms > 0 and not timestamps_used:
+            if forced and config.overlap_ms > 0 and not timestamps_used and not flush:
                 overlap_bytes = int(config.overlap_ms * b_per_ms)
-                prefix = segment_bytes[-overlap_bytes:] if overlap_bytes else b""
-                state.buffer = bytearray(prefix + tail)
+                if overlap_bytes > 0 and overlap_bytes < len(segment_bytes) and tail:
+                    prefix = segment_bytes[-overlap_bytes:]
+                    state.buffer = bytearray(prefix + tail)
+                else:
+                    state.buffer = bytearray(tail)
             else:
                 state.buffer = bytearray(tail)
 
