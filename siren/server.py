@@ -125,8 +125,18 @@ def detect_trailing_silence_cut(
         return None
     if len(buffer) < config.min_silence_ms * b_per_ms:
         return None
+    total_ms = int(len(buffer) / b_per_ms)
+    window_ms = config.min_silence_ms + config.trailing_silence_ms
+    if total_ms > window_ms:
+        window_bytes = int(window_ms * b_per_ms)
+        window_bytes = min(window_bytes, len(buffer))
+        segment_bytes = bytes(buffer[-window_bytes:])
+        window_offset_ms = total_ms - int(window_bytes / b_per_ms)
+    else:
+        segment_bytes = bytes(buffer)
+        window_offset_ms = 0
     segment = AudioSegment(
-        data=bytes(buffer),
+        data=segment_bytes,
         sample_width=config.sample_width,
         frame_rate=config.sample_rate,
         channels=config.channels,
@@ -141,7 +151,7 @@ def detect_trailing_silence_cut(
     end_ms = len(segment)
     last_start, last_end = silence_ranges[-1]
     if end_ms - last_end <= config.trailing_silence_ms:
-        return last_end
+        return window_offset_ms + last_end
     return None
 
 
@@ -955,6 +965,8 @@ async def stream_transcriptions(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
             if "bytes" in message and message["bytes"] is not None:
                 chunk = message["bytes"]
                 if chunk:
