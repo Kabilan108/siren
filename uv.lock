@@ -3035,6 +3035,7 @@ dependencies = [
     { name = "nemo-toolkit", extra = ["asr"] },
     { name = "onnx" },
     { name = "pydantic" },
+    { name = "pydub" },
     { name = "python-multipart" },
     { name = "torch" },
 ]
@@ -3057,6 +3058,7 @@ requires-dist = [
     { name = "nemo-toolkit", extras = ["asr"], specifier = ">=2.6.0" },
     { name = "onnx", specifier = "==1.18" },
     { name = "pydantic", specifier = "==2.12.5" },
+    { name = "pydub", specifier = "==0.25.1" },
     { name = "python-multipart", specifier = "==0.0.22" },
     { name = "torch", specifier = "==2.9.1" },
 ]

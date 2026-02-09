@@ -330,11 +330,29 @@ def verify_token(
 def verify_websocket_token(websocket: WebSocket) -> None:
     auth_header = websocket.headers.get("Authorization", "")
     token = None
+    source = "none"
     if auth_header.lower().startswith("bearer "):
         token = auth_header.split(" ", 1)[1].strip()
+        source = "header"
     if token is None:
         token = websocket.query_params.get("token")
+        source = "query"
     if token != TOKEN:
+        def mask_token(value: str | None) -> str:
+            if not value:
+                return "<empty>"
+            if len(value) <= 8:
+                return f"{value}(len={len(value)})"
+            return f"{value[:4]}...{value[-4:]}(len={len(value)})"
+
+        logger.warning(
+            "websocket auth failed",
+            extra={
+                "source": source,
+                "token": mask_token(token),
+                "expected": mask_token(TOKEN),
+            },
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
