@@ -24,7 +24,10 @@ ADD . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
   uv sync --frozen
 
+RUN --mount=type=cache,target=/root/.cache/uv \
+  uv pip install wsproto==1.2.0
+
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
 
-ENTRYPOINT ["fastapi", "run", "siren/", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["uvicorn", "siren:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "wsproto"]
