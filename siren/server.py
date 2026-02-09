@@ -985,6 +985,8 @@ async def stream_transcriptions(websocket: WebSocket):
                     await websocket.send_text(json.dumps({"type": "config", "ok": True}))
                 elif payload.get("type") == "end" or text == "end":
                     await process_buffer(flush=True)
+                    await websocket.send_text(json.dumps({"type": "end", "ok": True}))
+                elif payload.get("type") == "close":
                     await websocket.close()
                     return
     except WebSocketDisconnect:
