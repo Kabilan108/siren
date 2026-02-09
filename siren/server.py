@@ -824,6 +824,10 @@ def apply_streaming_overrides(config: StreamingConfig, payload: dict) -> None:
 
 @app.websocket("/v1/audio/stream")
 async def stream_transcriptions(websocket: WebSocket):
+    logger.info(
+        "websocket connect attempt",
+        extra={"client": getattr(websocket, "client", None)},
+    )
     try:
         verify_websocket_token(websocket)
     except HTTPException:
