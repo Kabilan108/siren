@@ -13,6 +13,7 @@ dependencies = [
     "loguru==0.7.3",
     "nemo-toolkit[asr]>=2.6.0",
     "onnx==1.18",
+    "pillow>=12.2.0",
     "pydantic==2.12.5",
     "python-multipart==0.0.22",
     "torch==2.9.1",
