@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: %s <dockerhub-repository> [floating-tag]\n' "${0##*/}" >&2
+  printf 'Example: %s kabilan108/siren latest\n' "${0##*/}" >&2
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage
+  exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+cd "$repo_root"
+
+repository="$1"
+floating_tag="${2:-latest}"
+
+if [[ "$repository" == *:* ]]; then
+  printf 'Pass the repository without a tag, then pass the floating tag as the second argument.\n' >&2
+  usage
+  exit 2
+fi
+
+version="$(uv version --short)"
+
+if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+  printf 'Project version must be semver-compatible for a Docker tag, got: %s\n' "$version" >&2
+  exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  printf 'Docker is not available. Start Docker and try again.\n' >&2
+  exit 1
+fi
+
+tags=("$floating_tag")
+if [[ "$floating_tag" != "$version" ]]; then
+  tags+=("$version")
+fi
+
+build_tags=()
+for tag in "${tags[@]}"; do
+  build_tags+=(--tag "${repository}:${tag}")
+done
+
+printf 'Building %s with MODE=gpu...\n' "$repository"
+printf 'Tags:'
+for tag in "${tags[@]}"; do
+  printf ' %s:%s' "$repository" "$tag"
+done
+printf '\n'
+
+DOCKER_BUILDKIT=1 docker build \
+  --build-arg MODE=gpu \
+  "${build_tags[@]}" \
+  .
+
+for tag in "${tags[@]}"; do
+  image_ref="${repository}:${tag}"
+  printf 'Pushing %s...\n' "$image_ref"
+  docker push "$image_ref"
+done
+
+printf 'Pushed %s with %s tags\n' "$repository" "${#tags[@]}"
