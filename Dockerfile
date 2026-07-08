@@ -24,7 +24,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ADD . /app
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-  uv sync --frozen --no-dev
+  uv sync --frozen --no-dev \
+  && rm -rf /app/.uv-cache
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
