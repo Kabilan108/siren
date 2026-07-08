@@ -11,3 +11,4 @@ __pycache__/
 .direnv/
 data/
 .envrc
+.claude/settings.local.json

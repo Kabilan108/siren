@@ -1,4 +1,0 @@
-interface:
-  display_name: "Cut Release"
-  short_description: "Bump, changelog, and publish Siren images"
-  default_prompt: "Use $cut-release to prepare and publish a Siren release."
