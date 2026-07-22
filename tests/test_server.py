@@ -1,13 +1,18 @@
 import io
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from siren.server import (
+    TranscriptionResult,
+    TranscriptionSegment,
     WhisperModel,
     app,
     get_whisper_params,
+    parakeet_segments,
+    save_upload_file,
 )
 
 TOKEN = "dev_token"
@@ -28,10 +33,25 @@ def mock_whisper_model():
     # Create a mock segment with the expected text
     expected_text = "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
     mock.transcribe.return_value = (
-        [type("Segment", (), {"text": expected_text})()],  # Mock segments
-        {"language": "en"},  # Mock info
+        [
+            type(
+                "Segment",
+                (),
+                {"text": expected_text, "start": 0.0, "end": 8.5},
+            )()
+        ],
+        type("Info", (), {"language": "en", "duration": 8.5})(),
     )
     return mock
+
+
+def transcription_result(text: str = "ok") -> TranscriptionResult:
+    return TranscriptionResult(
+        text=text,
+        language="en",
+        duration=1.5,
+        segments=[TranscriptionSegment(id=0, start=0.0, end=1.5, text=text)],
+    )
 
 
 def test_list_models_success(client):
@@ -95,7 +115,7 @@ async def test_transcribe_audio_success(client, mock_whisper_model, tmp_path):
         AsyncMock(return_value=str(temp_audio)),
     ), patch(
         "siren.server.process_whisper_transcription",
-        AsyncMock(return_value=expected_text),
+        AsyncMock(return_value=transcription_result(expected_text)),
     ) as process_whisper:
         response = client.post(
             "/v1/audio/transcriptions",
@@ -134,7 +154,7 @@ async def test_transcribe_audio_parakeet_route(client, tmp_path):
         AsyncMock(return_value=str(temp_audio)),
     ), patch(
         "siren.server.process_parakeet_transcription",
-        AsyncMock(return_value=expected_text),
+        AsyncMock(return_value=transcription_result(expected_text)),
     ) as process_parakeet:
         response = client.post(
             "/v1/audio/transcriptions",
@@ -174,7 +194,7 @@ async def test_transcribe_audio_cleans_converted_files(client, tmp_path):
         AsyncMock(return_value=str(converted)),
     ), patch(
         "siren.server.process_whisper_transcription",
-        AsyncMock(return_value="ok"),
+        AsyncMock(return_value=transcription_result()),
     ):
         response = client.post(
             "/v1/audio/transcriptions",
@@ -186,6 +206,94 @@ async def test_transcribe_audio_cleans_converted_files(client, tmp_path):
 
     assert not original.exists()
     assert not converted.exists()
+
+
+def test_transcribe_audio_verbose_json(client, tmp_path):
+    """Verbose responses include timestamped segments without changing json."""
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+
+    with patch(
+        "siren.server.get_transcription_model",
+        AsyncMock(return_value=MagicMock()),
+    ), patch(
+        "siren.server.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.server.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.server.process_parakeet_transcription",
+        AsyncMock(return_value=transcription_result("timestamped")),
+    ):
+        response = client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={
+                "model": "nvidia/parakeet-tdt-0.6b-v2",
+                "response_format": "verbose_json",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "task": "transcribe",
+        "language": "en",
+        "duration": 1.5,
+        "text": "timestamped",
+        "segments": [
+            {"id": 0, "start": 0.0, "end": 1.5, "text": "timestamped"}
+        ],
+    }
+
+
+def test_transcribe_audio_rejects_unknown_response_format(client):
+    response = client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        files={"file": ("test.wav", b"data", "audio/wav")},
+        data={"response_format": "vtt"},
+    )
+
+    assert response.status_code == 400
+    assert "response_format" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_save_upload_file_streams_chunks(tmp_path):
+    upload = MagicMock()
+    upload.filename = "meeting.flac"
+    upload.read = AsyncMock(side_effect=[b"first", b"second", b""])
+
+    saved_path = await save_upload_file(upload)
+    try:
+        assert Path(saved_path).read_bytes() == b"firstsecond"
+        assert upload.read.await_count == 3
+        assert all(call.args == (1024 * 1024,) for call in upload.read.await_args_list)
+    finally:
+        Path(saved_path).unlink(missing_ok=True)
+
+
+def test_parakeet_segments_prefers_sentence_segments():
+    hypothesis = type(
+        "Hypothesis",
+        (),
+        {
+            "timestamp": {
+                "segment": [
+                    {"segment": "First sentence.", "start": 0.2, "end": 1.4},
+                    {"segment": "Second sentence.", "start": 1.6, "end": 3.0},
+                ],
+                "word": [{"word": "First", "start": 0.2, "end": 0.5}],
+            }
+        },
+    )()
+
+    assert [segment.model_dump() for segment in parakeet_segments(hypothesis)] == [
+        {"id": 0, "start": 0.2, "end": 1.4, "text": "First sentence."},
+        {"id": 1, "start": 1.6, "end": 3.0, "text": "Second sentence."},
+    ]
 
 
 @pytest.mark.asyncio

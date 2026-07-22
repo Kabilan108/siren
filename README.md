@@ -35,3 +35,25 @@ Tests are run automatically via GitHub Actions. To run locally:
 ```bash
 uv run pytest
 ```
+
+## Timestamped transcriptions
+
+`POST /v1/audio/transcriptions` keeps the OpenAI-compatible text response by
+default. Request `verbose_json` to include sentence-level timestamps:
+
+```bash
+curl -H "Authorization: Bearer $SIREN_API_KEY" \
+  -F "file=@meeting.flac" \
+  -F "model=nvidia/parakeet-tdt-0.6b-v2" \
+  -F "response_format=verbose_json" \
+  https://siren.example/v1/audio/transcriptions
+```
+
+The verbose response contains `text`, `language`, `duration`, and `segments`
+with `start`, `end`, and `text`. Multipart uploads are streamed to a temporary
+file in 1 MiB blocks.
+
+For long recordings on the current 24 GB GPU host, clients should submit
+bounded chunks. A representative meeting benchmark completed 5-minute and
+10-minute Parakeet chunks successfully; a 20-minute chunk exhausted GPU memory.
+The meeting pipeline therefore uses 10 minutes as its retry and progress unit.

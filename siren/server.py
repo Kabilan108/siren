@@ -9,6 +9,7 @@ import warnings
 import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, Literal
 
 import torch
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 warnings.filterwarnings("ignore", module="nemo")
 warnings.filterwarnings("ignore", message=".*torchaudio.*")
 
-import nemo.collections.asr as nemo_asr
+import nemo.collections.asr as nemo_asr  # noqa: E402
 
 # Suppress NeMo warnings for cleaner output
 
@@ -28,6 +29,7 @@ logger = logging.getLogger("uvicorn")
 TOKEN = os.environ.get("SIREN_API_KEY", "dev_token")
 CONFIG_FILE = Path("~/config.json").expanduser()
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
+UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 PARAKEET_MODELS = [
     "nvidia/parakeet-tdt-0.6b-v2",
@@ -85,6 +87,28 @@ def get_cuda_stats() -> dict[str, int]:
 
 class TranscriptionResponse(BaseModel):
     text: str
+
+
+class TranscriptionSegment(BaseModel):
+    id: int
+    start: float
+    end: float
+    text: str
+
+
+class VerboseTranscriptionResponse(BaseModel):
+    task: Literal["transcribe"] = "transcribe"
+    language: str
+    duration: float
+    text: str
+    segments: list[TranscriptionSegment]
+
+
+class TranscriptionResult(BaseModel):
+    text: str
+    language: str
+    duration: float
+    segments: list[TranscriptionSegment]
 
 
 class ModelInfo(BaseModel):
@@ -207,8 +231,8 @@ async def save_upload_file(upload_file: UploadFile) -> str:
     try:
         suffix = os.path.splitext(upload_file.filename or "audio.wav")[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            content = await upload_file.read()
-            temp_file.write(content)
+            while content := await upload_file.read(UPLOAD_CHUNK_BYTES):
+                temp_file.write(content)
             return temp_file.name
     except Exception as e:
         logger.error(f"Failed to save upload file: {e}")
@@ -269,20 +293,62 @@ async def process_whisper_transcription(
     audio_path: str,
     model: WhisperModel,
     language: str | None = None,
-) -> str:
+) -> TranscriptionResult:
     """Process transcription with Whisper model."""
     loop = asyncio.get_running_loop()
-    segments, _info = await loop.run_in_executor(
+    raw_segments, info = await loop.run_in_executor(
         None, lambda: model.transcribe(audio_path, language=language)
     )
-    return " ".join(segment.text.strip() for segment in segments)
+    segments = [
+        TranscriptionSegment(
+            id=index,
+            start=float(segment.start),
+            end=float(segment.end),
+            text=segment.text.strip(),
+        )
+        for index, segment in enumerate(raw_segments)
+        if segment.text.strip()
+    ]
+    return TranscriptionResult(
+        text=" ".join(segment.text for segment in segments),
+        language=str(getattr(info, "language", language or "unknown")),
+        duration=float(
+            getattr(info, "duration", segments[-1].end if segments else 0.0)
+        ),
+        segments=segments,
+    )
+
+
+def parakeet_segments(hypothesis: Any) -> list[TranscriptionSegment]:
+    """Convert NeMo timestamp dictionaries into the public segment schema."""
+    timestamps = getattr(hypothesis, "timestamp", {}) or {}
+    raw_segments = timestamps.get("segment") or timestamps.get("word") or []
+    segments = []
+    for index, segment in enumerate(raw_segments):
+        text = str(
+            segment.get("segment")
+            or segment.get("word")
+            or segment.get("text")
+            or ""
+        ).strip()
+        if not text:
+            continue
+        segments.append(
+            TranscriptionSegment(
+                id=index,
+                start=float(segment.get("start", 0.0)),
+                end=float(segment.get("end", 0.0)),
+                text=text,
+            )
+        )
+    return segments
 
 
 async def process_parakeet_transcription(
     audio_path: str,
     model: nemo_asr.models.ASRModel,
     request_id: str | None = None,
-) -> str:
+) -> TranscriptionResult:
     """Process transcription with Parakeet model."""
     loop = asyncio.get_running_loop()
     audio_info = get_wav_info(audio_path)
@@ -291,7 +357,10 @@ async def process_parakeet_transcription(
         torch.cuda.synchronize()
 
     start = time.perf_counter()
-    output = await loop.run_in_executor(None, lambda: model.transcribe([audio_path]))
+    output = await loop.run_in_executor(
+        None,
+        lambda: model.transcribe([audio_path], timestamps=True, verbose=False),
+    )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -305,8 +374,19 @@ async def process_parakeet_transcription(
         **get_cuda_stats(),
     )
     if not output:
-        return ""
-    return output[0].text
+        return TranscriptionResult(
+            text="",
+            language="en",
+            duration=float(audio_info.get("audio_duration_sec", 0.0)),
+            segments=[],
+        )
+    hypothesis = output[0]
+    return TranscriptionResult(
+        text=str(hypothesis.text),
+        language="en",
+        duration=float(audio_info.get("audio_duration_sec", 0.0)),
+        segments=parakeet_segments(hypothesis),
+    )
 
 
 def load_model(model_name: str) -> WhisperModel | nemo_asr.models.ASRModel:
@@ -452,7 +532,7 @@ async def list_models():
 
 @app.post(
     "/v1/audio/transcriptions",
-    response_model=TranscriptionResponse,
+    response_model=VerboseTranscriptionResponse | TranscriptionResponse,
     dependencies=[Depends(verify_token)],
 )
 async def transcribe_audio(
@@ -465,13 +545,22 @@ async def transcribe_audio(
         None,
         description="The language of the input audio. Supplying the input language in ISO-639-1 format will improve accuracy and latency. Note: Parakeet models only support English.",
     ),
-):
+    response_format: str = Form(
+        "json",
+        description="Response shape: json for text only, or verbose_json for timestamped segments.",
+    ),
+) -> VerboseTranscriptionResponse | TranscriptionResponse:
     """OpenAI compatible transcription endpoint"""
     original_path = None
     converted_path = None
     request_id = uuid.uuid4().hex
     request_start = time.perf_counter()
     try:
+        if response_format not in {"json", "verbose_json"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="response_format must be 'json' or 'verbose_json'",
+            )
         transcription_model = await get_transcription_model(model)
         target_model = model if model is not None else current_model_name
 
@@ -497,11 +586,11 @@ async def transcribe_audio(
 
         # Process transcription based on model type
         if is_parakeet_model(target_model):
-            full_text = await process_parakeet_transcription(
+            result = await process_parakeet_transcription(
                 audio_path, transcription_model, request_id=request_id
             )
         else:
-            full_text = await process_whisper_transcription(
+            result = await process_whisper_transcription(
                 audio_path, transcription_model, language
             )
 
@@ -512,12 +601,15 @@ async def transcribe_audio(
             request_id=request_id,
             model=target_model,
             latency_ms=total_ms,
-            text_length=len(full_text),
+            text_length=len(result.text),
+            segment_count=len(result.segments),
         )
         logger.info(
-            f"Transcription completed. Text length: {len(full_text)} characters"
+            f"Transcription completed. Text length: {len(result.text)} characters"
         )
-        return TranscriptionResponse(text=full_text)
+        if response_format == "verbose_json":
+            return VerboseTranscriptionResponse(**result.model_dump())
+        return TranscriptionResponse(text=result.text)
     except HTTPException:
         raise
     except Exception as e:
