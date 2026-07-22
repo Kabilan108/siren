@@ -30,6 +30,7 @@ TOKEN = os.environ.get("SIREN_API_KEY", "dev_token")
 CONFIG_FILE = Path("~/config.json").expanduser()
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+SIREN_VERSION = "1.1.0"
 
 PARAKEET_MODELS = [
     "nvidia/parakeet-tdt-0.6b-v2",
@@ -43,6 +44,7 @@ token_header = HTTPBearer(auto_error=True)
 current_model: WhisperModel | nemo_asr.models.ASRModel | None = None
 current_model_name: str | None = None
 model_lock = asyncio.Lock()
+inference_semaphore = asyncio.Semaphore(1)
 model_ready = asyncio.Event()
 model_loading_task: asyncio.Task | None = None
 model_loading_target: str | None = None
@@ -87,6 +89,11 @@ def get_cuda_stats() -> dict[str, int]:
 
 class TranscriptionResponse(BaseModel):
     text: str
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    version: str
 
 
 class TranscriptionSegment(BaseModel):
@@ -228,13 +235,17 @@ def save_config(model_name: str):
 
 
 async def save_upload_file(upload_file: UploadFile) -> str:
+    temp_path: str | None = None
     try:
         suffix = os.path.splitext(upload_file.filename or "audio.wav")[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_path = temp_file.name
             while content := await upload_file.read(UPLOAD_CHUNK_BYTES):
                 temp_file.write(content)
-            return temp_file.name
+            return temp_path
     except Exception as e:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
         logger.error(f"Failed to save upload file: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -296,19 +307,26 @@ async def process_whisper_transcription(
 ) -> TranscriptionResult:
     """Process transcription with Whisper model."""
     loop = asyncio.get_running_loop()
+
+    def transcribe() -> tuple[list[Any], Any]:
+        raw_segments, info = model.transcribe(audio_path, language=language)
+        return list(raw_segments), info
+
     raw_segments, info = await loop.run_in_executor(
-        None, lambda: model.transcribe(audio_path, language=language)
+        None, transcribe
     )
-    segments = [
-        TranscriptionSegment(
-            id=index,
-            start=float(segment.start),
-            end=float(segment.end),
-            text=segment.text.strip(),
-        )
-        for index, segment in enumerate(raw_segments)
-        if segment.text.strip()
-    ]
+    segments = []
+    for segment in raw_segments:
+        text = segment.text.strip()
+        if text:
+            segments.append(
+                TranscriptionSegment(
+                    id=len(segments),
+                    start=float(segment.start),
+                    end=float(segment.end),
+                    text=text,
+                )
+            )
     return TranscriptionResult(
         text=" ".join(segment.text for segment in segments),
         language=str(getattr(info, "language", language or "unknown")),
@@ -324,7 +342,7 @@ def parakeet_segments(hypothesis: Any) -> list[TranscriptionSegment]:
     timestamps = getattr(hypothesis, "timestamp", {}) or {}
     raw_segments = timestamps.get("segment") or timestamps.get("word") or []
     segments = []
-    for index, segment in enumerate(raw_segments):
+    for segment in raw_segments:
         text = str(
             segment.get("segment")
             or segment.get("word")
@@ -335,7 +353,7 @@ def parakeet_segments(hypothesis: Any) -> list[TranscriptionSegment]:
             continue
         segments.append(
             TranscriptionSegment(
-                id=index,
+                id=len(segments),
                 start=float(segment.get("start", 0.0)),
                 end=float(segment.get("end", 0.0)),
                 text=text,
@@ -408,7 +426,7 @@ async def _load_model_in_background(target_model: str) -> None:
     global current_model, current_model_name, model_load_error
     try:
         if current_model is not None:
-            del current_model
+            current_model = None
             torch.cuda.empty_cache()
 
         model = await asyncio.to_thread(load_model, target_model)
@@ -470,19 +488,22 @@ async def ensure_model_loaded(
     return current_model
 
 
-async def get_transcription_model(
-    model: str | None = None,
-) -> WhisperModel | nemo_asr.models.ASRModel:
-    global current_model, current_model_name
+def resolve_transcription_model_name(model: str | None) -> str:
     available_models = {m.id for m in get_available_models()}
-
     target_model = model if model is not None else current_model_name
-
     if target_model not in available_models:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Invalid model: '{target_model}'. Use /v1/models to see available models.",
         )
+    return target_model
+
+
+async def get_transcription_model(
+    model: str | None = None,
+) -> WhisperModel | nemo_asr.models.ASRModel:
+    global current_model, current_model_name
+    target_model = resolve_transcription_model_name(model)
 
     if (
         target_model == current_model_name
@@ -507,9 +528,15 @@ async def get_transcription_model(
 app = FastAPI(
     title="siren",
     description="API for transcribing audio using Whisper and Parakeet models, compatible with OpenAI schema",
-    version="1.0.0",
+    version=SIREN_VERSION,
     lifespan=lifespan,
 )
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    """Report service availability and the running Siren version."""
+    return HealthResponse(version=SIREN_VERSION)
 
 
 @app.get(
@@ -556,13 +583,7 @@ async def transcribe_audio(
     request_id = uuid.uuid4().hex
     request_start = time.perf_counter()
     try:
-        if response_format not in {"json", "verbose_json"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="response_format must be 'json' or 'verbose_json'",
-            )
-        transcription_model = await get_transcription_model(model)
-        target_model = model if model is not None else current_model_name
+        target_model = resolve_transcription_model_name(model)
 
         original_path = await save_upload_file(file)
         audio_path = await ensure_16k_wav(original_path)
@@ -585,14 +606,16 @@ async def transcribe_audio(
         )
 
         # Process transcription based on model type
-        if is_parakeet_model(target_model):
-            result = await process_parakeet_transcription(
-                audio_path, transcription_model, request_id=request_id
-            )
-        else:
-            result = await process_whisper_transcription(
-                audio_path, transcription_model, language
-            )
+        async with inference_semaphore:
+            transcription_model = await get_transcription_model(target_model)
+            if is_parakeet_model(target_model):
+                result = await process_parakeet_transcription(
+                    audio_path, transcription_model, request_id=request_id
+                )
+            else:
+                result = await process_whisper_transcription(
+                    audio_path, transcription_model, language
+                )
 
         total_ms = int((time.perf_counter() - request_start) * 1000)
         log_event(

@@ -50,10 +50,20 @@ curl -H "Authorization: Bearer $SIREN_API_KEY" \
 ```
 
 The verbose response contains `text`, `language`, `duration`, and `segments`
-with `start`, `end`, and `text`. Multipart uploads are streamed to a temporary
-file in 1 MiB blocks.
+with `start`, `end`, and `text`. Other response-format values retain the legacy
+JSON `{ "text": ... }` response. Multipart uploads are streamed to a temporary
+file in 1 MiB blocks, and model inference is serialized to keep concurrent
+requests from exhausting GPU memory.
 
 For long recordings on the current 24 GB GPU host, clients should submit
 bounded chunks. A representative meeting benchmark completed 5-minute and
 10-minute Parakeet chunks successfully; a 20-minute chunk exhausted GPU memory.
 The meeting pipeline therefore uses 10 minutes as its retry and progress unit.
+
+## Health check
+
+`GET /health` is unauthenticated and returns the running service version:
+
+```json
+{"status":"ok","version":"1.1.0"}
+```

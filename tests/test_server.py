@@ -1,8 +1,10 @@
 import io
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from siren.server import (
@@ -12,6 +14,7 @@ from siren.server import (
     app,
     get_whisper_params,
     parakeet_segments,
+    process_whisper_transcription,
     save_upload_file,
 )
 
@@ -66,6 +69,13 @@ def test_list_models_success(client):
     assert all("id" in model for model in data["data"])
     assert VALID_MODEL in [model["id"] for model in data["data"]]
     assert any(model["id"].startswith("nvidia/parakeet") for model in data["data"])
+
+
+def test_health_reports_siren_version(client):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "version": "1.1.0"}
 
 
 def test_list_models_unauthorized(client):
@@ -248,16 +258,32 @@ def test_transcribe_audio_verbose_json(client, tmp_path):
     }
 
 
-def test_transcribe_audio_rejects_unknown_response_format(client):
-    response = client.post(
-        "/v1/audio/transcriptions",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-        files={"file": ("test.wav", b"data", "audio/wav")},
-        data={"response_format": "vtt"},
-    )
+def test_transcribe_audio_preserves_legacy_response_format_behavior(client, tmp_path):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
 
-    assert response.status_code == 400
-    assert "response_format" in response.json()["detail"]
+    with patch(
+        "siren.server.get_transcription_model",
+        AsyncMock(return_value=MagicMock()),
+    ), patch(
+        "siren.server.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.server.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.server.process_whisper_transcription",
+        AsyncMock(return_value=transcription_result("legacy")),
+    ):
+        response = client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={"model": "distil-large-v3", "response_format": "text"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "legacy"}
 
 
 @pytest.mark.asyncio
@@ -275,6 +301,45 @@ async def test_save_upload_file_streams_chunks(tmp_path):
         Path(saved_path).unlink(missing_ok=True)
 
 
+@pytest.mark.asyncio
+async def test_save_upload_file_removes_partial_file(tmp_path):
+    upload = MagicMock()
+    upload.filename = "meeting.flac"
+    upload.read = AsyncMock(side_effect=[b"partial", OSError("disk full")])
+    saved_path = tmp_path / "partial.flac"
+
+    with patch(
+        "siren.server.tempfile.NamedTemporaryFile",
+        return_value=saved_path.open("w+b"),
+    ), pytest.raises(HTTPException):
+        await save_upload_file(upload)
+
+    assert not saved_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_whisper_generator_is_consumed_off_event_loop():
+    loop_thread = threading.get_ident()
+    decode_threads = []
+    model = MagicMock(spec=WhisperModel)
+
+    def segments():
+        decode_threads.append(threading.get_ident())
+        yield type(
+            "Segment", (), {"text": "hello", "start": 0.0, "end": 1.0}
+        )()
+
+    model.transcribe.return_value = (
+        segments(),
+        type("Info", (), {"language": "en", "duration": 1.0})(),
+    )
+
+    result = await process_whisper_transcription("audio.wav", model)
+
+    assert result.text == "hello"
+    assert decode_threads and decode_threads[0] != loop_thread
+
+
 def test_parakeet_segments_prefers_sentence_segments():
     hypothesis = type(
         "Hypothesis",
@@ -282,6 +347,7 @@ def test_parakeet_segments_prefers_sentence_segments():
         {
             "timestamp": {
                 "segment": [
+                    {"segment": "", "start": 0.0, "end": 0.1},
                     {"segment": "First sentence.", "start": 0.2, "end": 1.4},
                     {"segment": "Second sentence.", "start": 1.6, "end": 3.0},
                 ],
@@ -307,7 +373,7 @@ async def test_transcribe_audio_invalid_model(client):
         "/v1/audio/transcriptions",
         headers={"Authorization": f"Bearer {TOKEN}"},
         files={"file": ("test.wav", audio_data, "audio/wav")},
-        params={"model": INVALID_MODEL},
+        data={"model": INVALID_MODEL},
     )
 
     assert response.status_code == 404
