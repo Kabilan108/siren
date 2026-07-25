@@ -41,6 +41,19 @@ class TranscriptionResult(BaseModel):
     segments: list[TranscriptionSegment]
 
 
+class DiarizationTurn(BaseModel):
+    start: float
+    end: float
+    speaker: str
+
+
+class DiarizationResponse(BaseModel):
+    duration: float
+    model: str
+    speakers: list[str]
+    turns: list[DiarizationTurn]
+
+
 class ModelInfo(BaseModel):
     id: str
 
