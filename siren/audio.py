@@ -51,13 +51,15 @@ async def save_upload_file(
             while content := await upload_file.read(UPLOAD_CHUNK_BYTES):
                 temp_file.write(content)
             return temp_path
-    except Exception as exc:
+    except BaseException as exc:
         if temp_path:
             Path(temp_path).unlink(missing_ok=True)
         fields: dict[str, object] = {"error": str(exc)}
         if request_id is not None:
             fields["request_id"] = request_id
         log_event(logging.ERROR, "upload_save_failed", **fields)
+        if not isinstance(exc, Exception):
+            raise
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process audio file",
@@ -80,22 +82,26 @@ async def convert_to_16k_wav(
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
         output_path = temp_file.name
 
-    process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-y",
-        "-i",
-        audio_path,
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "wav",
-        output_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _stdout, stderr = await process.communicate()
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-i",
+            audio_path,
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+    except BaseException:
+        Path(output_path).unlink(missing_ok=True)
+        raise
     if process.returncode != 0:
         fields: dict[str, object] = {
             "audio_path": audio_path,

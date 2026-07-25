@@ -14,7 +14,11 @@ from siren.audio import save_upload_file
 from siren.backends.parakeet import parakeet_segments
 from siren.backends.whisper import process_whisper_transcription
 from siren.models import get_whisper_params
-from siren.schemas import TranscriptionResult, TranscriptionSegment
+from siren.schemas import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    TranscriptionWord,
+)
 from siren.server import app
 
 TOKEN = "dev_token"
@@ -213,8 +217,7 @@ async def test_transcribe_audio_cleans_converted_files(client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_transcribe_audio_verbose_json(client, tmp_path):
-    """Verbose responses include timestamped segments without changing json."""
+async def test_transcribe_audio_default_verbose_json_has_no_words(client, tmp_path):
     temp_audio = tmp_path / "audio.wav"
     temp_audio.write_bytes(b"fake")
 
@@ -251,6 +254,164 @@ async def test_transcribe_audio_verbose_json(client, tmp_path):
             {"id": 0, "start": 0.0, "end": 1.5, "text": "timestamped"}
         ],
     }
+    assert backend.transcribe.call_args.kwargs["word_timestamps"] is False
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_word_granularity_returns_ordered_words(
+    client,
+    tmp_path,
+):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+    result = transcription_result("two words")
+    result.segments[0].words = [
+        TranscriptionWord(start=0.1, end=0.4, word="two"),
+        TranscriptionWord(start=0.5, end=0.9, word=" words"),
+    ]
+
+    backend = MagicMock()
+    backend.transcribe = AsyncMock(return_value=result)
+
+    with patch(
+        "siren.models.get_transcription_backend",
+        AsyncMock(return_value=backend),
+    ), patch(
+        "siren.api.transcriptions.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.api.transcriptions.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ):
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={
+                "model": "distil-large-v3",
+                "response_format": "verbose_json",
+                "timestamp_granularities[]": ["segment", "word"],
+            },
+        )
+
+    assert response.status_code == 200
+    words = response.json()["segments"][0]["words"]
+    assert words == [
+        {"start": 0.1, "end": 0.4, "word": "two"},
+        {"start": 0.5, "end": 0.9, "word": " words"},
+    ]
+    assert [word["start"] for word in words] == sorted(
+        word["start"] for word in words
+    )
+    assert backend.transcribe.call_args.kwargs["word_timestamps"] is True
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_strips_unrequested_backend_words(
+    client,
+    tmp_path,
+):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+
+    result = transcription_result("with-words")
+    result.segments[0].words = [TranscriptionWord(start=0.0, end=0.5, word="with")]
+    backend = MagicMock()
+    backend.transcribe = AsyncMock(return_value=result)
+
+    with patch(
+        "siren.models.get_transcription_backend",
+        AsyncMock(return_value=backend),
+    ), patch(
+        "siren.api.transcriptions.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.api.transcriptions.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ):
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={"model": "distil-large-v3", "response_format": "verbose_json"},
+        )
+
+    assert response.status_code == 200
+    assert all("words" not in segment for segment in response.json()["segments"])
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_word_granularity_with_json_format_is_rejected(
+    client,
+    tmp_path,
+):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+
+    backend = MagicMock()
+    backend.transcribe = AsyncMock(return_value=transcription_result("plain"))
+
+    with patch(
+        "siren.models.get_transcription_backend",
+        AsyncMock(return_value=backend),
+    ), patch(
+        "siren.api.transcriptions.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.api.transcriptions.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ):
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={
+                "model": "distil-large-v3",
+                "response_format": "json",
+                "timestamp_granularities[]": "word",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "verbose_json" in response.json()["detail"]
+    backend.transcribe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_unknown_timestamp_granularity_is_rejected(
+    client,
+    tmp_path,
+):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+
+    backend = MagicMock()
+    backend.transcribe = AsyncMock(return_value=transcription_result("timestamped"))
+
+    with patch(
+        "siren.models.get_transcription_backend",
+        AsyncMock(return_value=backend),
+    ), patch(
+        "siren.api.transcriptions.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.api.transcriptions.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ):
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={
+                "model": "distil-large-v3",
+                "response_format": "verbose_json",
+                "timestamp_granularities[]": "sentence",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "sentence" in response.json()["detail"]
+    backend.transcribe.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -337,6 +498,51 @@ async def test_whisper_generator_is_consumed_off_event_loop():
 
     assert result.text == "hello"
     assert decode_threads and decode_threads[0] != loop_thread
+    assert "word_timestamps" not in model.transcribe.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_whisper_word_timestamps_are_requested_and_ordered():
+    model = MagicMock(spec=WhisperModel)
+    segment = type(
+        "Segment",
+        (),
+        {
+            "text": "first second",
+            "start": 0.0,
+            "end": 1.0,
+            "words": [
+                type(
+                    "Word",
+                    (),
+                    {"word": " second", "start": 0.5, "end": 0.8},
+                )(),
+                type(
+                    "Word",
+                    (),
+                    {"word": "first", "start": 0.1, "end": 0.4},
+                )(),
+            ],
+        },
+    )()
+    model.transcribe.return_value = (
+        iter([segment]),
+        type("Info", (), {"language": "en", "duration": 1.0})(),
+    )
+
+    result = await process_whisper_transcription(
+        "audio.wav",
+        model,
+        word_timestamps=True,
+    )
+
+    assert model.transcribe.call_args.kwargs["word_timestamps"] is True
+    assert result.segments[0].words is not None
+    assert [word.start for word in result.segments[0].words] == [0.1, 0.5]
+    assert [word.word for word in result.segments[0].words] == [
+        "first",
+        "second",
+    ]
 
 
 def test_parakeet_segments_prefers_sentence_segments():
@@ -355,10 +561,40 @@ def test_parakeet_segments_prefers_sentence_segments():
         },
     )()
 
-    assert [segment.model_dump() for segment in parakeet_segments(hypothesis)] == [
+    assert [
+        segment.model_dump(exclude_none=True)
+        for segment in parakeet_segments(hypothesis)
+    ] == [
         {"id": 0, "start": 0.2, "end": 1.4, "text": "First sentence."},
         {"id": 1, "start": 1.6, "end": 3.0, "text": "Second sentence."},
     ]
+
+
+def test_parakeet_segments_include_ordered_words_when_requested():
+    hypothesis = type(
+        "Hypothesis",
+        (),
+        {
+            "timestamp": {
+                "segment": [
+                    {"segment": "First sentence.", "start": 0.0, "end": 1.0},
+                    {"segment": "Second sentence.", "start": 1.0, "end": 2.0},
+                ],
+                "word": [
+                    {"word": "sentence", "start": 0.4, "end": 0.8},
+                    {"word": "First", "start": 0.1, "end": 0.3},
+                    {"word": "Second", "start": 1.1, "end": 1.4},
+                ],
+            }
+        },
+    )()
+
+    segments = parakeet_segments(hypothesis, word_timestamps=True)
+
+    assert segments[0].words is not None
+    assert [word.start for word in segments[0].words] == [0.1, 0.4]
+    assert segments[1].words is not None
+    assert [word.word for word in segments[1].words] == ["Second"]
 
 
 @pytest.mark.asyncio

@@ -28,10 +28,10 @@ class GoldenCase:
 
 def golden_cases(directory: str, model: str) -> list[GoldenCase]:
     cases: list[GoldenCase] = []
-    for golden_path in sorted((GOLDEN_ROOT / directory).glob("*.json")):
+    for golden_path in sorted((GOLDEN_ROOT / directory).glob("*.raw")):
         if golden_path.name.startswith("."):
             continue
-        clip, response_format = golden_path.name.removesuffix(".json").rsplit(".", 1)
+        clip, response_format = golden_path.name.removesuffix(".raw").rsplit(".", 1)
         audio_path = (
             REPO_ROOT / "test.wav"
             if clip == "test"
@@ -56,8 +56,8 @@ def request_transcription(
     client: httpx.Client,
     case: GoldenCase,
     token: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    expected: dict[str, Any] = json.loads(case.golden_path.read_text())
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    expected_bytes = case.golden_path.read_bytes()
     with case.audio_path.open("rb") as audio_file:
         response = client.post(
             "/v1/audio/transcriptions",
@@ -71,8 +71,8 @@ def request_transcription(
     assert response.status_code == 200, (
         f"{case.id}: expected HTTP 200, got {response.status_code}: {response.text}"
     )
-    live: dict[str, Any] = response.json()
-    return expected, live
+    expected: dict[str, Any] = json.loads(expected_bytes)
+    return expected, response.json(), expected_bytes == response.content
 
 
 @pytest.mark.golden
@@ -84,7 +84,7 @@ def test_golden_transcriptions() -> None:
     token = os.environ.get("SIREN_GOLDEN_TOKEN", "dev_token")
     references: list[str] = []
     hypotheses: list[str] = []
-    comparisons: list[tuple[GoldenCase, dict[str, Any], dict[str, Any]]] = []
+    comparisons: list[tuple[GoldenCase, dict[str, Any], dict[str, Any], bool]] = []
 
     with httpx.Client(
         base_url=base_url,
@@ -100,17 +100,18 @@ def test_golden_transcriptions() -> None:
         )
 
         for case in [*PARAKEET_CASES, *WHISPER_CASES]:
-            expected, live = request_transcription(client, case, token)
+            expected, live, byte_identical = request_transcription(client, case, token)
             references.append(str(expected["text"]))
             hypotheses.append(str(live.get("text", "")))
-            comparisons.append((case, expected, live))
+            comparisons.append((case, expected, live, byte_identical))
 
         restore_case = PARAKEET_CASES[0]
-        expected, live = request_transcription(client, restore_case, token)
-        comparisons.append((restore_case, expected, live))
+        expected, live, byte_identical = request_transcription(client, restore_case, token)
+        comparisons.append((restore_case, expected, live, byte_identical))
 
     aggregate_wer = wer(references, hypotheses)
     print(f"aggregate WER: {aggregate_wer:.12f}")
     assert aggregate_wer == 0
-    for case, expected, live in comparisons:
+    for case, expected, live, byte_identical in comparisons:
         assert live == expected, case.id
+        assert byte_identical, f"{case.id}: semantically equal but not byte-identical"

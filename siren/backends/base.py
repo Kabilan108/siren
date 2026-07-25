@@ -8,6 +8,7 @@ class TranscriptionBackend(Protocol):
         self,
         audio_path: str,
         *,
-        language: str | None,
-        request_id: str | None,
+        language: str | None = None,
+        word_timestamps: bool = False,
+        request_id: str | None = None,
     ) -> TranscriptionResult: ...

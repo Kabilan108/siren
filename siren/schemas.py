@@ -12,11 +12,18 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class TranscriptionWord(BaseModel):
+    start: float
+    end: float
+    word: str
+
+
 class TranscriptionSegment(BaseModel):
     id: int
     start: float
     end: float
     text: str
+    words: list[TranscriptionWord] | None = None
 
 
 class VerboseTranscriptionResponse(BaseModel):
