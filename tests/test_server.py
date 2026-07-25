@@ -258,6 +258,105 @@ async def test_transcribe_audio_default_verbose_json_has_no_words(client, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_transcribe_audio_pause_segmentation_uses_backend_words(
+    client,
+    tmp_path,
+):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+    result = transcription_result("one two three")
+    result.segments[0].end = 32.0
+    result.segments[0].words = [
+        TranscriptionWord(start=0.0, end=0.4, word="one"),
+        TranscriptionWord(start=0.5, end=0.9, word="two"),
+        TranscriptionWord(start=31.0, end=31.5, word="three"),
+    ]
+
+    backend = MagicMock()
+    backend.transcribe = AsyncMock(return_value=result)
+
+    with patch(
+        "siren.models.get_transcription_backend",
+        AsyncMock(return_value=backend),
+    ), patch(
+        "siren.api.transcriptions.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.api.transcriptions.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ):
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={
+                "model": "nvidia/parakeet-tdt-0.6b-v2",
+                "response_format": "verbose_json",
+                "segmentation": "pause",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["segments"] == [
+        {"id": 0, "start": 0.0, "end": 0.9, "text": "one two"},
+        {"id": 1, "start": 31.0, "end": 31.5, "text": "three"},
+    ]
+    assert backend.transcribe.call_args.kwargs["word_timestamps"] is True
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_pause_segmentation_requires_verbose_json(client):
+    response = await client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        files={"file": ("test.wav", b"data", "audio/wav")},
+        data={
+            "model": "nvidia/parakeet-tdt-0.6b-v2",
+            "segmentation": "pause",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "segmentation=pause requires response_format=verbose_json."
+    )
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_unknown_segmentation_is_rejected(client):
+    response = await client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        files={"file": ("test.wav", b"data", "audio/wav")},
+        data={"segmentation": "sentence"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Invalid segmentation: 'sentence'. Supported values: 'native', 'pause'."
+    )
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_pause_segmentation_rejects_whisper(client):
+    response = await client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        files={"file": ("test.wav", b"data", "audio/wav")},
+        data={
+            "model": VALID_MODEL,
+            "response_format": "verbose_json",
+            "segmentation": "pause",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "segmentation=pause is currently supported only for Parakeet models"
+    )
+
+
+@pytest.mark.asyncio
 async def test_transcribe_audio_word_granularity_returns_ordered_words(
     client,
     tmp_path,
@@ -304,6 +403,44 @@ async def test_transcribe_audio_word_granularity_returns_ordered_words(
         word["start"] for word in words
     )
     assert backend.transcribe.call_args.kwargs["word_timestamps"] is True
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_pause_falls_back_to_native_without_words(
+    client,
+    tmp_path,
+):
+    temp_audio = tmp_path / "audio.wav"
+    temp_audio.write_bytes(b"fake")
+
+    result = transcription_result("no-words")
+    backend = MagicMock()
+    backend.transcribe = AsyncMock(return_value=result)
+
+    with patch(
+        "siren.models.get_transcription_backend",
+        AsyncMock(return_value=backend),
+    ), patch(
+        "siren.api.transcriptions.save_upload_file",
+        AsyncMock(return_value=str(temp_audio)),
+    ), patch(
+        "siren.api.transcriptions.ensure_16k_wav",
+        AsyncMock(return_value=str(temp_audio)),
+    ):
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            files={"file": ("test.wav", b"data", "audio/wav")},
+            data={
+                "model": "nvidia/parakeet-tdt-0.6b-v2",
+                "response_format": "verbose_json",
+                "segmentation": "pause",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [segment["text"] for segment in payload["segments"]] == ["no-words"]
 
 
 @pytest.mark.asyncio

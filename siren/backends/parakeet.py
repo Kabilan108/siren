@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 import warnings
 from typing import Any
@@ -40,7 +41,18 @@ def parakeet_words(hypothesis: Any) -> list[TranscriptionWord]:
         for raw_word in raw_words
         if str(raw_word.get("word") or raw_word.get("text") or "").strip()
     ]
-    return sorted(words, key=lambda word: word.start)
+    finite_words = [
+        word
+        for word in words
+        if math.isfinite(word.start) and math.isfinite(word.end)
+    ]
+    if len(finite_words) != len(words):
+        log_event(
+            logging.WARNING,
+            "word_timestamps_nonfinite_dropped",
+            dropped=len(words) - len(finite_words),
+        )
+    return sorted(finite_words, key=lambda word: word.start)
 
 
 def parakeet_segments(

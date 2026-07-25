@@ -10,6 +10,7 @@ from siren.api.auth import verify_token
 from siren.audio import ensure_16k_wav, get_wav_info, save_upload_file
 from siren.logging_utils import log_event
 from siren.schemas import TranscriptionResponse, VerboseTranscriptionResponse
+from siren.segmentation import segment_words
 
 router = APIRouter()
 
@@ -37,7 +38,11 @@ async def transcribe_audio(
     timestamp_granularities: list[str] | None = Form(
         None,
         alias="timestamp_granularities[]",
-        description="Timestamp granularities to populate for verbose_json responses.",
+        description="Timestamp granularities to populate for verbose_json responses. Supported timestamp_granularities[] values: word and segment.",
+    ),
+    segmentation: str = Form(
+        "native",
+        description="Segment construction mode. Supported segmentation values: native (backend-native segments) and pause (word-driven Parakeet segments).",
     ),
 ) -> VerboseTranscriptionResponse | TranscriptionResponse:
     original_path: str | None = None
@@ -45,6 +50,16 @@ async def transcribe_audio(
     request_id = uuid.uuid4().hex
     request_start = time.perf_counter()
     try:
+        if segmentation not in {"native", "pause"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid segmentation: '{segmentation}'. Supported values: 'native', 'pause'.",
+            )
+        if segmentation == "pause" and response_format != "verbose_json":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="segmentation=pause requires response_format=verbose_json.",
+            )
         if timestamp_granularities:
             unknown = set(timestamp_granularities) - {"word", "segment"}
             if unknown:
@@ -57,11 +72,17 @@ async def transcribe_audio(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="timestamp_granularities requires response_format=verbose_json.",
                 )
-        word_timestamps = (
+        return_word_timestamps = (
             timestamp_granularities is not None
             and "word" in timestamp_granularities
         )
+        word_timestamps = return_word_timestamps or segmentation == "pause"
         target_model = models.resolve_transcription_model_name(model)
+        if segmentation == "pause" and not models.is_parakeet_model(target_model):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="segmentation=pause is currently supported only for Parakeet models",
+            )
 
         original_path = await save_upload_file(file, request_id=request_id)
         audio_path = await ensure_16k_wav(original_path, request_id=request_id)
@@ -78,6 +99,7 @@ async def transcribe_audio(
             filename=file.filename,
             audio_bytes=audio_size,
             word_timestamps=word_timestamps,
+            segmentation=segmentation,
             **audio_info,
         )
 
@@ -93,6 +115,22 @@ async def transcribe_audio(
                 request_id=request_id,
             )
 
+        if segmentation == "pause":
+            words = [
+                word
+                for segment in result.segments
+                for word in (segment.words or [])
+            ]
+            if words:
+                result.segments = segment_words(words)
+            else:
+                log_event(
+                    logging.WARNING,
+                    "segmentation_fallback_native",
+                    request_id=request_id,
+                    reason="backend returned no word timestamps",
+                )
+
         total_ms = int((time.perf_counter() - request_start) * 1000)
         log_event(
             logging.INFO,
@@ -103,10 +141,11 @@ async def transcribe_audio(
             text_length=len(result.text),
             segment_count=len(result.segments),
             word_timestamps=word_timestamps,
+            segmentation=segmentation,
         )
         if response_format == "verbose_json":
             payload = result.model_dump()
-            if not word_timestamps:
+            if not return_word_timestamps:
                 for segment in payload["segments"]:
                     segment.pop("words", None)
             return VerboseTranscriptionResponse(**payload)
