@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from siren import config, models
 from siren.api import (
+    align_router,
     diarize_router,
     health_router,
     models_router,
@@ -38,3 +39,4 @@ app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(transcriptions_router)
 app.include_router(diarize_router)
+app.include_router(align_router)

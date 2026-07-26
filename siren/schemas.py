@@ -54,6 +54,29 @@ class DiarizationResponse(BaseModel):
     turns: list[DiarizationTurn]
 
 
+class AlignmentRequest(BaseModel):
+    words: list[TranscriptionWord]
+    turns: list[DiarizationTurn]
+
+
+class AlignedWord(TranscriptionWord):
+    speaker: str
+
+
+class AlignedSegment(BaseModel):
+    id: int
+    start: float
+    end: float
+    speaker: str
+    text: str
+    words: list[AlignedWord]
+
+
+class AlignmentResponse(BaseModel):
+    speakers: list[str]
+    segments: list[AlignedSegment]
+
+
 class ModelInfo(BaseModel):
     id: str
 
