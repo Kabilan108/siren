@@ -75,3 +75,9 @@ module-root = ""
 
 [tool.uv]
 environments = ["sys_platform != 'emscripten' and sys_platform != 'win32'"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not golden'"
+markers = [
+    "golden: live-server transcription regression tests (excluded by default)",
+]
