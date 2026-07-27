@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Sequence
@@ -24,6 +23,7 @@ from siren.jobs import get_chunk_seconds, get_memory_fraction
 from siren.logging_utils import log_event
 from siren.models import load_backend
 from siren.schemas import DiarizationTurn, TranscriptionWord
+from siren.io import atomic_write_json
 
 _PARENT_POLL_SECONDS = 5.0
 _SILENCE_DURATION_SECONDS = 0.4
@@ -307,29 +307,6 @@ def _diarize(wav_path: Path) -> tuple[str, list[DiarizationTurn]]:
     return model_name, turns
 
 
-def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            json.dump(payload, temporary_file, separators=(",", ":"))
-            temporary_file.write("\n")
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        temporary_path.replace(path)
-    except BaseException:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        raise
-
-
 def _load_job(job_dir: Path) -> dict[str, object]:
     payload = json.loads((job_dir / "job.json").read_text())
     if not isinstance(payload, dict):
@@ -404,7 +381,7 @@ def run_pipeline(job_dir: Path) -> dict[str, object]:
             for segment in alignment.segments
         ],
     }
-    _atomic_write_json(result_path, payload)
+    atomic_write_json(result_path, payload)
     _emit_phase("aligning", 0.99)
     return payload
 

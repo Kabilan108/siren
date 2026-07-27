@@ -14,14 +14,14 @@ async def verify_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
-            headers={"WW-Authenticate": "Bearer"},
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     if credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication scheme. Bearer token required.",
-            headers={"WW-Authenticate": "Bearer"},
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     if not hmac.compare_digest(
@@ -31,7 +31,7 @@ async def verify_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token.",
-            headers={"WW-Authenticate": "Bearer"},
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     return credentials.credentials

@@ -8,6 +8,7 @@ import pytest_asyncio
 from siren.alignment import align_words
 from siren.schemas import AlignmentResponse
 from siren.server import app
+from siren import server
 
 TOKEN = "dev_token"
 
@@ -187,3 +188,24 @@ async def test_align_rejects_non_finite_intervals(
 
     assert response.status_code == 400
     assert response.json() == {"detail": "words[0] has non-finite start or end values."}
+
+
+@pytest.mark.asyncio
+async def test_align_rejects_oversized_body_without_content_length(
+    client,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(server, "_BODY_LIMITS", (("/v1/audio/align", lambda: 1024, True),))
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for _ in range(4):
+            yield b"x" * 512
+
+    response = await client.post(
+        "/v1/audio/align",
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+        content=chunks(),
+    )
+
+    assert response.status_code == 413
+    assert "exceeds the maximum" in response.json()["detail"]

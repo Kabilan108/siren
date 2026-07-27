@@ -8,6 +8,7 @@ from unittest.mock import ANY, MagicMock
 import pytest
 
 from siren.diarization import worker
+from siren import io as siren_io
 
 
 class FakeSortformerModel:
@@ -116,7 +117,7 @@ def test_atomic_write_failure_leaves_no_partial_output(
         output_file.write("{")
         raise OSError("disk full")
 
-    monkeypatch.setattr(worker.json, "dump", fail_during_dump)
+    monkeypatch.setattr(siren_io.json, "dump", fail_during_dump)
 
     with pytest.raises(OSError, match="disk full"):
         worker.diarize(audio_path, output_path)

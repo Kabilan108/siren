@@ -7,7 +7,6 @@ import re
 import shutil
 import stat
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -28,6 +27,7 @@ from siren.jobs import (
 from siren.gpu import batch_gpu_lock
 from siren.logging_utils import log_event
 from siren.schemas import TranscriptJobResult
+from siren.io import atomic_write_json
 
 _JOB_ID = re.compile(r"^job_[0-9a-f]{32}$")
 _PHASES = {"chunking", "transcribing", "diarizing", "aligning"}
@@ -55,29 +55,6 @@ class JobUploadTooLargeError(Exception):
 
 def _default_worker_command(job_dir: Path) -> tuple[str, ...]:
     return (sys.executable, "-m", "siren.jobs.worker", str(job_dir))
-
-
-def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            json.dump(payload, temporary_file, separators=(",", ":"))
-            temporary_file.write("\n")
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        temporary_path.replace(path)
-    except BaseException:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        raise
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
@@ -254,7 +231,7 @@ class JobRunner:
             async with self._queue_lock:
                 if len(self._queued_order) >= self.max_queued_jobs:
                     raise JobQueueFullError(self.max_queued_jobs)
-                _atomic_write_json(job_dir / "job.json", state)
+                atomic_write_json(job_dir / "job.json", state)
                 self._queued_order.append(job_id)
                 position = len(self._queued_order)
                 self._queue.put_nowait(job_id)
@@ -323,7 +300,7 @@ class JobRunner:
                         }
                     )
                     state.pop("error", None)
-                    _atomic_write_json(state_path, state)
+                    atomic_write_json(state_path, state)
                     recovered += 1
                     log_event(
                         logging.INFO,
@@ -347,7 +324,7 @@ class JobRunner:
                     "updated_at": time.time(),
                 }
             )
-            _atomic_write_json(state_path, state)
+            atomic_write_json(state_path, state)
             recovered += 1
             log_event(
                 logging.ERROR,
@@ -497,7 +474,7 @@ class JobRunner:
             state.pop("error", None)
         else:
             state["error"] = error
-        _atomic_write_json(state_path, state)
+        atomic_write_json(state_path, state)
         return state
 
     def _persist_failure(

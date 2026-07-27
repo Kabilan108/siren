@@ -1,9 +1,7 @@
-import json
 import logging
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Sequence
@@ -15,6 +13,7 @@ import torch
 from siren.audio import get_wav_info
 from siren.diarization import get_diarization_model, get_memory_fraction
 from siren.logging_utils import log_event
+from siren.io import atomic_write_json
 
 _SPEAKER_LABEL = re.compile(r"^speaker_(\d+)$", re.IGNORECASE)
 _PARENT_POLL_SECONDS = 5.0
@@ -99,29 +98,6 @@ def _initialize_cuda() -> None:
     torch.cuda.set_per_process_memory_fraction(get_memory_fraction())
 
 
-def _atomic_write_json(output_path: Path, payload: dict[str, object]) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=output_path.parent,
-            prefix=f".{output_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            json.dump(payload, temporary_file, separators=(",", ":"))
-            temporary_file.write("\n")
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        temporary_path.replace(output_path)
-    except BaseException:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        raise
-
-
 def diarize(audio_path: Path, output_path: Path) -> dict[str, object]:
     model_name = get_diarization_model()
     _initialize_cuda()
@@ -137,7 +113,7 @@ def diarize(audio_path: Path, output_path: Path) -> dict[str, object]:
         "speakers": sorted({str(turn["speaker"]) for turn in turns}),
         "turns": turns,
     }
-    _atomic_write_json(output_path, payload)
+    atomic_write_json(output_path, payload)
     return payload
 
 
