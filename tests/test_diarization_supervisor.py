@@ -213,6 +213,8 @@ async def test_lifespan_shutdown_terminates_registered_worker(
     terminate_process_group = AsyncMock()
     ensure_model_loaded = AsyncMock()
     unload_model = MagicMock()
+    start_job_runner = AsyncMock()
+    stop_job_runner = AsyncMock()
     monkeypatch.setattr(supervisor, "active_worker_process", process)
     monkeypatch.setattr(supervisor, "_process_group_exists", lambda _pid: True)
     monkeypatch.setattr(
@@ -229,10 +231,14 @@ async def test_lifespan_shutdown_terminates_registered_worker(
         ensure_model_loaded,
     )
     monkeypatch.setattr("siren.server.models.unload_model", unload_model)
+    monkeypatch.setattr("siren.server.job_runner.start", start_job_runner)
+    monkeypatch.setattr("siren.server.job_runner.stop", stop_job_runner)
 
     async with lifespan(app):
         pass
 
     terminate_process_group.assert_awaited_once_with(process)
     assert supervisor.active_worker_process is None
+    start_job_runner.assert_awaited_once()
+    stop_job_runner.assert_awaited_once()
     unload_model.assert_called_once()

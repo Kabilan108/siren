@@ -9,21 +9,25 @@ from siren.api import (
     align_router,
     diarize_router,
     health_router,
+    jobs_router,
     models_router,
     transcriptions_router,
 )
 from siren.diarization.supervisor import terminate_active_worker
+from siren.jobs.runner import job_runner
 from siren.logging_utils import log_event
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    models.current_model_name = config.load_model_name()
-    await models.ensure_model_loaded(models.current_model_name)
+    await job_runner.start()
     try:
+        models.current_model_name = config.load_model_name()
+        await models.ensure_model_loaded(models.current_model_name)
         yield
     finally:
         log_event(logging.INFO, "shutdown_started")
+        await job_runner.stop()
         await terminate_active_worker()
         models.unload_model()
         log_event(logging.INFO, "shutdown_complete")
@@ -38,5 +42,6 @@ app = FastAPI(
 app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(transcriptions_router)
+app.include_router(jobs_router)
 app.include_router(diarize_router)
 app.include_router(align_router)
