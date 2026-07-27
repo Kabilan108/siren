@@ -25,6 +25,7 @@ from siren.jobs import (
     get_spool_dir,
     get_timeout_seconds,
 )
+from siren.gpu import batch_gpu_lock
 from siren.logging_utils import log_event
 from siren.schemas import TranscriptJobResult
 
@@ -556,6 +557,7 @@ class JobRunner:
         stderr_task: asyncio.Task[None] | None = None
         worker_error: dict[str, str] = {}
         exit_code: int | None = None
+        gate_acquired = False
         self._running_job_ids.add(job_id)
         try:
             self._write_transition(
@@ -565,6 +567,8 @@ class JobRunner:
                 progress=0.0,
             )
             job_dir = self.spool_dir / job_id
+            await batch_gpu_lock.acquire()
+            gate_acquired = True
             process = await asyncio.create_subprocess_exec(
                 *self._worker_command(job_dir),
                 start_new_session=True,
@@ -633,11 +637,19 @@ class JobRunner:
             if process is not None:
                 await _terminate_process_group(process)
                 exit_code = process.returncode
-            self._persist_failure(
-                job_id,
-                error="server_shutdown",
-                exit_code=exit_code,
-            )
+            if self._load_valid_result(self.spool_dir / job_id) is not None:
+                self._write_transition(
+                    job_id,
+                    status="completed",
+                    phase=None,
+                    progress=1.0,
+                )
+            else:
+                self._persist_failure(
+                    job_id,
+                    error="server_shutdown",
+                    exit_code=exit_code,
+                )
             raise
         except Exception as exc:
             error = str(exc) or type(exc).__name__
@@ -647,6 +659,8 @@ class JobRunner:
                 exit_code=exit_code,
             )
         finally:
+            if gate_acquired:
+                batch_gpu_lock.release()
             if self.active_workers.get(job_id) is process:
                 self.active_workers.pop(job_id, None)
             self._running_job_ids.discard(job_id)

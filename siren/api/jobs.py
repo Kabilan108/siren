@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from siren import models
 from siren.api.auth import verify_token
+from siren.jobs.errors import sanitize_job_error
 from siren.jobs.runner import (
     JobQueueFullError,
     JobUploadTooLargeError,
@@ -78,6 +79,8 @@ async def get_transcript_job(
     response = TranscriptJobStatus.model_validate(state)
     payload = response.model_dump(exclude_none=True)
     payload["phase"] = response.phase
+    if "error" in payload:
+        payload["error"] = sanitize_job_error(str(payload["error"]))
     return JSONResponse(content=payload)
 
 

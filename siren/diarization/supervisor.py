@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException, status
 
 from siren.diarization import get_timeout_seconds
+from siren.gpu import batch_gpu_lock
 from siren.logging_utils import log_event
 
 diarize_lock = asyncio.Lock()
@@ -103,6 +104,8 @@ def _process_group_exists(process_group_id: int) -> bool:
 async def _terminate_process_group(
     process: asyncio.subprocess.Process,
 ) -> None:
+    if process.returncode is not None:
+        return
     process_group_id = process.pid
     with contextlib.suppress(ProcessLookupError):
         os.killpg(process_group_id, signal.SIGTERM)
@@ -162,7 +165,7 @@ async def run_diarization(
     stderr_task: asyncio.Task[None] | None = None
 
     try:
-        async with diarize_lock:
+        async with batch_gpu_lock, diarize_lock:
             with tempfile.TemporaryDirectory(prefix="siren-diarize-") as temp_dir:
                 output_path = Path(temp_dir) / "result.json"
                 process = await asyncio.create_subprocess_exec(
