@@ -13,17 +13,19 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx
 import torch
 
 from siren.alignment import align_words
 from siren.audio import get_wav_info
 from siren.diarization import get_diarization_model
 from siren.diarization.worker import normalize_speaker_label, parse_turns
+from siren.io import atomic_write_json
 from siren.jobs import get_chunk_seconds, get_memory_fraction
+from siren.jobs.resident import ResidentBackend, validate_resident_url
 from siren.logging_utils import log_event
 from siren.models import load_backend
 from siren.schemas import DiarizationTurn, TranscriptionWord
-from siren.io import atomic_write_json
 
 _PARENT_POLL_SECONDS = 5.0
 _SILENCE_DURATION_SECONDS = 0.4
@@ -246,7 +248,18 @@ async def _transcribe_chunks(
     model_name: str,
     language: str | None,
 ) -> tuple[str, str, list[TranscriptionWord]]:
-    backend = load_backend(model_name)
+    resident_url = os.environ.get("SIREN_JOB_ASR_URL")
+    if resident_url:
+        validate_resident_url(resident_url)
+    client = (
+        httpx.AsyncClient(timeout=300.0, trust_env=False, follow_redirects=False)
+        if resident_url else None
+    )
+    backend = (
+        ResidentBackend(client, resident_url, model_name)
+        if client is not None and resident_url is not None
+        else load_backend(model_name)
+    )
     texts: list[str] = []
     words: list[TranscriptionWord] = []
     detected_language = language or "en"
@@ -275,8 +288,11 @@ async def _transcribe_chunks(
             )
     finally:
         del backend
-        gc.collect()
-        torch.cuda.empty_cache()
+        if client is not None:
+            await client.aclose()
+        else:
+            gc.collect()
+            torch.cuda.empty_cache()
     return " ".join(texts), detected_language, words
 
 

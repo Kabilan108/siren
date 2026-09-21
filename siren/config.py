@@ -12,7 +12,24 @@ CONFIG_FILE = Path(
 ).expanduser()
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
 UPLOAD_CHUNK_BYTES = 1024 * 1024
-SIREN_VERSION = "1.1.0"
+SIREN_VERSION = "1.2.0"
+
+# Shared by interactive dictation and durable transcript jobs. Keep vocabulary
+# bounded; these are recognition hints, never unconditional text replacements.
+WHISPER_INITIAL_PROMPT = (
+    "Claude, Codex, OpenCode, CodeRabbit, NixOS, Nix, Siren, Dictator, "
+    "Jacurutu, Sietch, pnpm, PyTorch, Kubernetes, PostgreSQL, Moberg, "
+    "qEEG, EDF, CNSUtils, Tailscale, tmux, Bitbucket, E-BOOST."
+)
+
+
+def whisper_speech_gate_enabled() -> bool:
+    # Enable after audio review; independent of the recognition recipe so a
+    # false rejection can be disabled without reverting the model/settings.
+    value = os.environ.get("SIREN_WHISPER_SPEECH_GATE", "false").lower()
+    if value not in {"true", "false", "1", "0"}:
+        raise ValueError("SIREN_WHISPER_SPEECH_GATE must be true/false or 1/0")
+    return value in {"true", "1"}
 
 PARAKEET_MODELS = [
     "nvidia/parakeet-tdt-0.6b-v2",

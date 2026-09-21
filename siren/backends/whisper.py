@@ -1,7 +1,13 @@
+from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 from faster_whisper import WhisperModel
+from faster_whisper.audio import decode_audio
+from numpy.typing import NDArray
 
+from siren import config
+from siren.backends.speech_gate import has_speech
 from siren.concurrency import run_in_worker_thread
 from siren.schemas import (
     TranscriptionResult,
@@ -18,10 +24,27 @@ async def process_whisper_transcription(
     word_timestamps: bool = False,
 ) -> TranscriptionResult:
     def transcribe() -> tuple[list[Any], Any]:
-        kwargs: dict[str, Any] = {"language": language}
+        resolved_language = language or "en"
+        kwargs: dict[str, Any] = {
+            "language": resolved_language,
+            "beam_size": 1,
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "vad_filter": False,
+            "initial_prompt": (
+                config.WHISPER_INITIAL_PROMPT if resolved_language == "en" else None
+            ),
+        }
         if word_timestamps:
             kwargs["word_timestamps"] = True
-        raw_segments, info = model.transcribe(audio_path, **kwargs)
+        audio: str | NDArray[np.float32] = audio_path
+        if config.whisper_speech_gate_enabled():
+            audio = decode_audio(audio_path, sampling_rate=16000)
+            if not has_speech(audio):
+                return [], SimpleNamespace(
+                    language=resolved_language, duration=len(audio) / 16000
+                )
+        raw_segments, info = model.transcribe(audio, **kwargs)
         return list(raw_segments), info
 
     raw_segments, info = await run_in_worker_thread(transcribe)

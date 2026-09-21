@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0 - 2026-09-21
+
+- Added an optional low-strength Claude terminology hint for Parakeet TDT 0.6B v2.
+- Set explicit Whisper decoding defaults for dictation and retained word timestamps for jobs.
+- Added an optional whole-recording speech gate without trimming recognized speech.
+- Added an optional loopback ASR adapter so job workers can reuse the resident model.
+- Kept Parakeet as the default model; speech gating and resident job routing remain opt-in.
+
 ## 1.1.0 - 2026-07-28
 
 - Added an async job API (`POST /v1/jobs/transcripts`, plus status and

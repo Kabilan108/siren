@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 import time
 import warnings
 from typing import Any
@@ -170,6 +171,34 @@ class ParakeetBackend:
         )
 
 
+def configure_claude_hint(model: Any, model_name: str) -> None:
+    """Apply the evaluated hint only to the evaluated TDT checkpoint."""
+    enabled = os.environ.get("SIREN_PARAKEET_CLAUDE_HINT", "false").lower()
+    if enabled not in {"true", "false", "1", "0"}:
+        raise ValueError("SIREN_PARAKEET_CLAUDE_HINT must be true/false or 1/0")
+    if enabled not in {"true", "1"} or model_name != "nvidia/parakeet-tdt-0.6b-v2":
+        return
+
+    from nemo.collections.asr.parts.submodules.rnnt_decoding import (
+        RNNTBPEDecodingConfig,
+    )
+    from omegaconf import OmegaConf, open_dict
+
+    defaults = OmegaConf.create(
+        OmegaConf.to_container(OmegaConf.structured(RNNTBPEDecodingConfig))
+    )
+    cfg = OmegaConf.merge(defaults, model.cfg.decoding)
+    with open_dict(cfg):
+        cfg.strategy = "greedy_batch"
+        cfg.compute_timestamps = True
+        cfg.greedy.boosting_tree.key_phrases_list = ["Claude"]
+        cfg.greedy.boosting_tree.context_score = 1.0
+        cfg.greedy.boosting_tree.depth_scaling = 2.0
+        cfg.greedy.boosting_tree.use_triton = True
+        cfg.greedy.boosting_tree_alpha = 0.125
+    model.change_decoding_strategy(cfg)
+
+
 def load_parakeet_backend(model_name: str) -> ParakeetBackend:
     warnings.filterwarnings("ignore", module="nemo")
     warnings.filterwarnings("ignore", message=".*torchaudio.*")
@@ -180,4 +209,5 @@ def load_parakeet_backend(model_name: str) -> ParakeetBackend:
     if torch.cuda.is_available():
         model = model.cuda()
     model.eval()
+    configure_claude_hint(model, model_name)
     return ParakeetBackend(model)
