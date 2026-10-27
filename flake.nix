@@ -3,14 +3,12 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixpkgs-python.url = "github:cachix/nixpkgs-python";
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      nixpkgs-python,
     }:
     let
       system = "x86_64-linux";
@@ -23,7 +21,7 @@
     {
       devShell.${system} = pkgs.mkShell {
         buildInputs = with pkgs; [
-          nixpkgs-python.packages.${system}."3.13.2"
+          pkgs.python313
           pkgs.nodejs_20
           uv
           cudaPackages.cudatoolkit
@@ -57,8 +55,8 @@
         }:
         let
           cfg = config.services.siren;
-          # .python-version pins 3.13.2 exactly and uv enforces it
-          python = nixpkgs-python.packages.${pkgs.stdenv.hostPlatform.system}."3.13.2";
+          # Keep the interpreter on the consumer's nixpkgs security updates.
+          python = pkgs.python313;
           # same library set the devshell uses; wheels (torch, nemo) load these
           # at runtime, with the host driver coming from /run/opengl-driver
           runtimeLibs = lib.makeLibraryPath [

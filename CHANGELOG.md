@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Updated the locked certifi and pip releases after the eMudhra CA compromise.
+- Switched the NixOS module and development shell to nixpkgs' Python 3.13 so
+  interpreter and OpenSSL security updates follow the consumer's nixpkgs pin.
+
 ## 1.2.0 - 2026-09-21
 
 - Added an optional low-strength Claude terminology hint for Parakeet TDT 0.6B v2.
