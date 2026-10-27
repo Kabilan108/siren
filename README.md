@@ -100,7 +100,7 @@ model selection; changing the Python default alone does not override saved state
 `GET /health` is unauthenticated and returns the running service version:
 
 ```json
-{"status":"ok","version":"1.2.0"}
+{"status":"ok","version":"1.2.1"}
 ```
 
 ### Parakeet terminology hint
