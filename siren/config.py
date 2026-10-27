@@ -12,7 +12,7 @@ CONFIG_FILE = Path(
 ).expanduser()
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
 UPLOAD_CHUNK_BYTES = 1024 * 1024
-SIREN_VERSION = "1.2.0"
+SIREN_VERSION = "1.2.1"
 
 # Shared by interactive dictation and durable transcript jobs. Keep vocabulary
 # bounded; these are recognition hints, never unconditional text replacements.

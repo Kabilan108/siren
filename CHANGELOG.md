@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 - 2026-10-27
 
 - Updated the locked certifi and pip releases after the eMudhra CA compromise.
 - Switched the NixOS module and development shell to nixpkgs' Python 3.13 so
   interpreter and OpenSSL security updates follow the consumer's nixpkgs pin.
+- Limited uv resolution to x86_64 Linux, the only platform with kaldialign wheels.
 
 ## 1.2.0 - 2026-09-21
 

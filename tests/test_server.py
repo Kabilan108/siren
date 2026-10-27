@@ -69,7 +69,7 @@ async def test_health_reports_siren_version(client):
     response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "1.2.0"}
+    assert response.json() == {"status": "ok", "version": "1.2.1"}
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "siren"
-version = "1.2.0"
+version = "1.2.1"
 description = "OpenAI compatible whisper server with Faster Whisper and Parakeet backends"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -75,7 +75,7 @@ module-name = "siren"
 module-root = ""
 
 [tool.uv]
-environments = ["sys_platform != 'emscripten' and sys_platform != 'win32'"]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not golden'"
