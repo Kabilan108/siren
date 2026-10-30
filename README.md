@@ -63,18 +63,23 @@ The meeting pipeline therefore uses 10 minutes as its retry and progress unit.
 ## Speaker smoothing
 
 Transcript jobs and `POST /v1/audio/align` fold short speaker flickers back
-into the surrounding turn after assigning words to diarization turns. A run of
-at most `SIREN_SMOOTH_MAX_WORDS` words (default 3) spanning at most
-`SIREN_SMOOTH_MAX_SECONDS` (default 1.0) between two runs of the same other
-speaker is reassigned to that speaker when either:
+into the surrounding turn after assigning words to diarization turns. A
+candidate is a run of at most `SIREN_SMOOTH_MAX_WORDS` words (default 3)
+spanning at most `SIREN_SMOOTH_MAX_SECONDS` (default 1.0) between two runs of
+the same other speaker. It is reassigned to that speaker when it is glued to an
+unfinished sentence:
 
-- the word before it does not end a sentence (`.`, `?` or `!`), controlled by
-  `SIREN_SMOOTH_MID_SENTENCE` (default `true`), or
-- the gaps on both sides are under `SIREN_SMOOTH_MAX_GAP` seconds (default 0.3).
+- the word before it does not end with `.`, `?`, `!` or `…` (closing quotes
+  and brackets allowed) and the run starts less than `SIREN_SMOOTH_MAX_PAUSE`
+  seconds (default 0.5) after it, or
+- the run's own last word does not end a sentence and the next word follows
+  within `SIREN_SMOOTH_MAX_PAUSE`.
 
-A reply such as "Yeah." after a finished sentence and a real pause keeps its
-own speaker. Set `SIREN_SMOOTH_MAX_WORDS=0` to disable smoothing. The defaults
-come from `results/diarization-eval-2026-10-30/`.
+A run punctuated as a whole sentence ("Yeah.", "No.") keeps its speaker, as
+does a run set off by pauses of at least `SIREN_SMOOTH_MAX_PAUSE`. Runs are
+decided left to right against the already merged turn, so alternating
+fragments collapse into the surrounding speaker. Set
+`SIREN_SMOOTH_MAX_WORDS=0` to disable smoothing.
 
 ## Whisper recognition defaults
 

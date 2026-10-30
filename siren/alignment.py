@@ -18,25 +18,26 @@ from siren.segmentation import segment_words
 _TIE_TOLERANCE = 1e-6
 _DEFAULT_SPEAKER = "SPEAKER_00"
 _IndexedTurn = tuple[int, DiarizationTurn]
-_SENTENCE_END = re.compile(r"[.?!][\"')\]]*$")
+_SENTENCE_END = re.compile(r"[.?!\u2026][\"'\u201d\u2019\u00bb)\]}]*$")
+_OPENING_MARKS = "\"'\u201c\u2018\u00ab([{"
 
 
 @dataclass(frozen=True)
 class SpeakerSmoothing:
     """Limits for folding a short speaker run back into the surrounding turn.
 
-    A run is a candidate when it is short on both counts and the same speaker
-    talks on either side of it. It is folded when the speech on both sides
-    flows into it without a pause of at least ``max_gap`` seconds, or, with
-    ``fold_mid_sentence``, when the preceding word does not end a sentence.
-    A reply that follows a finished sentence and a real pause keeps its own
-    speaker.
+    A run of at most ``max_words`` words and ``max_seconds`` seconds, between
+    two runs of one other speaker, is folded into that speaker when it is
+    glued to an unfinished sentence: the word before it does not end a
+    sentence and follows it by less than ``max_pause`` seconds, or the run's
+    own last word does not end a sentence and the next word follows it by
+    less than ``max_pause``. A run punctuated as a whole sentence, or set off
+    by pauses of at least ``max_pause``, keeps its speaker.
     """
 
     max_words: int = 3
     max_seconds: float = 1.0
-    max_gap: float = 0.3
-    fold_mid_sentence: bool = True
+    max_pause: float = 0.5
 
 
 def get_speaker_smoothing() -> SpeakerSmoothing | None:
@@ -48,11 +49,8 @@ def get_speaker_smoothing() -> SpeakerSmoothing | None:
         max_seconds=float(
             os.environ.get("SIREN_SMOOTH_MAX_SECONDS", str(defaults.max_seconds))
         ),
-        max_gap=float(
-            os.environ.get("SIREN_SMOOTH_MAX_GAP", str(defaults.max_gap))
-        ),
-        fold_mid_sentence=_env_flag(
-            "SIREN_SMOOTH_MID_SENTENCE", defaults.fold_mid_sentence
+        max_pause=float(
+            os.environ.get("SIREN_SMOOTH_MAX_PAUSE", str(defaults.max_pause))
         ),
     )
     if smoothing.max_words <= 0 or smoothing.max_seconds <= 0.0:
@@ -64,18 +62,26 @@ def smooth_speaker_runs(
     words: Sequence[AlignedWord],
     smoothing: SpeakerSmoothing,
 ) -> list[AlignedWord]:
-    """Reassign short runs sandwiched inside one speaker's continuous turn."""
+    """Reassign short runs glued inside another speaker's sentence.
+
+    Runs are decided left to right against the already merged turn, so a
+    folded run joins its neighbours before the next run is judged.
+    """
     runs = [list(run) for _speaker, run in groupby(words, key=lambda w: w.speaker)]
-    smoothed: list[AlignedWord] = []
+    merged: list[list[AlignedWord]] = []
     for index, run in enumerate(runs):
-        if 0 < index < len(runs) - 1 and _is_flicker(
-            runs[index - 1], run, runs[index + 1], smoothing
+        if (
+            merged
+            and index < len(runs) - 1
+            and _is_flicker(merged[-1], run, runs[index + 1], smoothing)
         ):
-            speaker = runs[index - 1][0].speaker
-            smoothed.extend(word.model_copy(update={"speaker": speaker}) for word in run)
+            speaker = merged[-1][0].speaker
+            run = [word.model_copy(update={"speaker": speaker}) for word in run]
+        if merged and merged[-1][0].speaker == run[0].speaker:
+            merged[-1].extend(run)
         else:
-            smoothed.extend(run)
-    return smoothed
+            merged.append(run)
+    return [word for run in merged for word in run]
 
 
 def _is_flicker(
@@ -84,28 +90,31 @@ def _is_flicker(
     after: Sequence[AlignedWord],
     smoothing: SpeakerSmoothing,
 ) -> bool:
-    if before[0].speaker != after[0].speaker:
+    speaker = before[0].speaker
+    if speaker != after[0].speaker or speaker == run[0].speaker:
         return False
     if len(run) > smoothing.max_words:
         return False
     if run[-1].end - run[0].start > smoothing.max_seconds:
         return False
-    if smoothing.fold_mid_sentence and not _ends_sentence(before[-1].word):
-        return True
+    if _is_whole_sentence(run):
+        return False
     gap_before = run[0].start - before[-1].end
     gap_after = after[0].start - run[-1].end
-    return gap_before < smoothing.max_gap and gap_after < smoothing.max_gap
+    glued_before = (
+        not _ends_sentence(before[-1].word) and gap_before < smoothing.max_pause
+    )
+    glued_after = not _ends_sentence(run[-1].word) and gap_after < smoothing.max_pause
+    return glued_before or glued_after
 
 
 def _ends_sentence(word: str) -> bool:
     return _SENTENCE_END.search(word.strip()) is not None
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    value = os.environ.get(name, str(default)).lower()
-    if value not in {"true", "false", "1", "0"}:
-        raise ValueError(f"{name} must be true/false or 1/0")
-    return value in {"true", "1"}
+def _is_whole_sentence(run: Sequence[AlignedWord]) -> bool:
+    first = run[0].word.strip().lstrip(_OPENING_MARKS)
+    return first[:1].isupper() and _ends_sentence(run[-1].word)
 
 
 def assign_speakers_to_words(
