@@ -62,26 +62,25 @@ The meeting pipeline therefore uses 10 minutes as its retry and progress unit.
 
 ## Speaker smoothing
 
-Transcript jobs and `POST /v1/audio/align` fold short speaker flickers back
-into the surrounding turn after assigning words to diarization turns.
-`SIREN_SPEAKER_SMOOTHING` turns this on or off (default `true`).
+Transcript jobs and `POST /v1/audio/align` can fold short speaker flickers back
+into the surrounding turn after assigning words to diarization turns. It is off
+by default; set `SIREN_SPEAKER_SMOOTHING=true` to enable it. Its folds still
+need review by ear; see `results/diarization-smoothing-eval-2026-10-30-r3/`.
 
 A candidate is a run of at most `SIREN_SMOOTH_MAX_WORDS` words (default 3)
 spanning at most `SIREN_SMOOTH_MAX_SECONDS` (default 1.0) between two runs of
 the same other speaker. Runs are decided left to right against the already
 merged turn. A candidate keeps its speaker when:
 
-- it starts with a reply word ("yeah", "no", "okay", "mhm", "thanks", ...), or
-- the word before it ends with `?`, or
-- it ends a sentence (`.`, `?`, `!`, `…`, closing quotes allowed), unless the
-  word before it is unfinished and flows into it with no silent 80 ms frame.
+- the gap before or after it is negative (overlap) or at least
+  `SIREN_SMOOTH_MAX_PAUSE` seconds (default 0.5),
+- it starts with a reply word ("yeah", "no", "okay", "mhm", "thanks", ...),
+- the word before it ends in a question (`?`, `?!`, `!?`, ...), or
+- it ends a sentence (`.`, `?`, `!`, `…` or a cluster of them, closing quotes
+  allowed). The exception is when the word before it is unfinished and
+  flows into it with no silent 80 ms frame (gap under 0.04 s).
 
-Otherwise it is folded when it is glued to an unfinished sentence: the word
-before it does not end a sentence and the run starts less than
-`SIREN_SMOOTH_MAX_PAUSE` seconds (default 0.5) after it, or the next word
-follows the run within that pause. Where the 8 words on either side carry no
-punctuation, as in Parakeet's unpunctuated stretches, both gaps must be under
-the pause.
+Every other candidate is folded.
 
 ## Whisper recognition defaults
 

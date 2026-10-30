@@ -5,7 +5,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from siren.alignment import SpeakerSmoothing, align_words
+from siren.alignment import align_words
 from siren.schemas import AlignmentResponse
 from siren.server import app
 from siren import server
@@ -124,7 +124,7 @@ async def test_align_runs_computation_in_worker_thread(
         align_words,
         [],
         [],
-        smoothing=SpeakerSmoothing(),
+        smoothing=None,
     )
 
 
@@ -144,29 +144,11 @@ FLICKER_PAYLOAD = {
 
 
 @pytest.mark.asyncio
-async def test_align_folds_mid_sentence_flicker_by_default(
-    client: httpx.AsyncClient,
-) -> None:
-    response = await client.post(
-        "/v1/audio/align",
-        headers={"Authorization": f"Bearer {TOKEN}"},
-        json=FLICKER_PAYLOAD,
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["speakers"] == ["SPEAKER_00"]
-    assert [segment["text"] for segment in body["segments"]] == [
-        "this is one sentence."
-    ]
-
-
-@pytest.mark.asyncio
-async def test_align_smoothing_can_be_disabled(
+async def test_align_keeps_flicker_by_default(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SIREN_SMOOTH_MAX_WORDS", "0")
+    monkeypatch.delenv("SIREN_SPEAKER_SMOOTHING", raising=False)
 
     response = await client.post(
         "/v1/audio/align",
@@ -179,6 +161,27 @@ async def test_align_smoothing_can_be_disabled(
         "SPEAKER_00",
         "SPEAKER_01",
         "SPEAKER_00",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_align_folds_mid_sentence_flicker_when_enabled(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIREN_SPEAKER_SMOOTHING", "true")
+
+    response = await client.post(
+        "/v1/audio/align",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json=FLICKER_PAYLOAD,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["speakers"] == ["SPEAKER_00"]
+    assert [segment["text"] for segment in body["segments"]] == [
+        "this is one sentence."
     ]
 
 

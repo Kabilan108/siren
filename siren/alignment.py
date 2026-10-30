@@ -18,9 +18,7 @@ from siren.segmentation import segment_words
 _TIE_TOLERANCE = 1e-6
 _DEFAULT_SPEAKER = "SPEAKER_00"
 _IndexedTurn = tuple[int, DiarizationTurn]
-_SENTENCE_END = re.compile(r"[.?!\u2026][\"'\u201d\u2019\u00bb)\]}]*$")
-_QUESTION_END = re.compile(r"\?[\"'\u201d\u2019\u00bb)\]}]*$")
-_PUNCTUATION = re.compile(r"[.,?!;:\u2026]")
+_SENTENCE_END = re.compile(r"([.?!\u2026]+)[\"'\u201d\u2019\u00bb)\]}]*$")
 _WORD_MARKS = "\"'\u201c\u201d\u2018\u2019\u00ab\u00bb()[]{}.,?!;:\u2026"
 # Words that open a reply or backchannel; a run starting with one is never folded.
 _REPLY_WORDS = frozenset(
@@ -34,7 +32,6 @@ _REPLY_WORDS = frozenset(
 # Parakeet TDT timestamps step in 80 ms frames; a smaller gap means no silent
 # frame between the words.
 _CONTINUOUS_GAP = 0.04
-_CONTEXT_WORDS = 8
 
 
 @dataclass(frozen=True)
@@ -42,13 +39,12 @@ class SpeakerSmoothing:
     """Limits for folding a short speaker run back into the surrounding turn.
 
     A candidate run has at most ``max_words`` words and ``max_seconds``
-    seconds and sits between two runs of one other speaker. It is never folded
-    when it starts with a reply word ("yeah", "no", "okay", ...) or follows a
-    question. A run that ends a sentence counts as a standalone reply unless
-    the word before it is unfinished and flows into it with no silent frame.
-    Otherwise it is folded when it is glued to an unfinished sentence on one
-    side by a gap under ``max_pause``; where the surrounding words carry no
-    punctuation, both gaps must be under ``max_pause``.
+    seconds and sits between two runs of one other speaker, with gaps on both
+    sides of at least zero and under ``max_pause``. A pause or an overlap on
+    either side keeps its speaker. So does a run that starts with a reply word
+    ("yeah", "no", "okay", ...) or follows a question. A run that ends a
+    sentence is folded only when the word before it is unfinished and flows
+    into it with no silent frame.
     """
 
     max_words: int = 3
@@ -57,7 +53,7 @@ class SpeakerSmoothing:
 
 
 def get_speaker_smoothing() -> SpeakerSmoothing | None:
-    enabled = os.environ.get("SIREN_SPEAKER_SMOOTHING", "true").lower()
+    enabled = os.environ.get("SIREN_SPEAKER_SMOOTHING", "false").lower()
     if enabled not in {"true", "false", "1", "0"}:
         raise ValueError("SIREN_SPEAKER_SMOOTHING must be true/false or 1/0")
     if enabled in {"false", "0"}:
@@ -121,22 +117,26 @@ def _is_flicker(
     if _bare_word(run[0].word) in _REPLY_WORDS:
         return False
     previous = before[-1].word
-    if _QUESTION_END.search(previous.strip()):
+    if "?" in _terminal_marks(previous):
         return False
     gap_before = run[0].start - before[-1].end
     gap_after = after[0].start - run[-1].end
-    context = [*before[-_CONTEXT_WORDS:], *run, *after[:_CONTEXT_WORDS]]
-    if not any(_PUNCTUATION.search(word.word) for word in context):
-        return gap_before < smoothing.max_pause and gap_after < smoothing.max_pause
+    if not (0.0 <= gap_before < smoothing.max_pause):
+        return False
+    if not (0.0 <= gap_after < smoothing.max_pause):
+        return False
     if _ends_sentence(run[-1].word):
         return not _ends_sentence(previous) and gap_before < _CONTINUOUS_GAP
-    glued_before = not _ends_sentence(previous) and gap_before < smoothing.max_pause
-    glued_after = gap_after < smoothing.max_pause
-    return glued_before or glued_after
+    return True
+
+
+def _terminal_marks(word: str) -> str:
+    match = _SENTENCE_END.search(word.strip())
+    return "" if match is None else match.group(1)
 
 
 def _ends_sentence(word: str) -> bool:
-    return _SENTENCE_END.search(word.strip()) is not None
+    return _terminal_marks(word) != ""
 
 
 def _bare_word(word: str) -> str:
