@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import torch
 
-from siren.alignment import align_words
+from siren.alignment import align_words, get_speaker_smoothing
 from siren.audio import get_wav_info
 from siren.diarization import get_diarization_model
 from siren.diarization.worker import normalize_speaker_label, parse_turns
@@ -378,7 +378,7 @@ def run_pipeline(job_dir: Path) -> dict[str, object]:
     _emit_phase("diarizing", 0.9)
 
     _emit_phase("aligning", 0.92)
-    alignment = align_words(words, turns)
+    alignment = align_words(words, turns, smoothing=get_speaker_smoothing())
     payload: dict[str, object] = {
         "text": text,
         "language": detected_language,

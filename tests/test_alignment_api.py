@@ -5,7 +5,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from siren.alignment import align_words
+from siren.alignment import SpeakerSmoothing, align_words
 from siren.schemas import AlignmentResponse
 from siren.server import app
 from siren import server
@@ -120,7 +120,66 @@ async def test_align_runs_computation_in_worker_thread(
         )
 
     assert response.status_code == 200
-    run_in_worker_thread.assert_awaited_once_with(align_words, [], [])
+    run_in_worker_thread.assert_awaited_once_with(
+        align_words,
+        [],
+        [],
+        smoothing=SpeakerSmoothing(),
+    )
+
+
+FLICKER_PAYLOAD = {
+    "words": [
+        {"start": 0.0, "end": 0.4, "word": "this"},
+        {"start": 0.45, "end": 0.8, "word": "is"},
+        {"start": 0.85, "end": 1.1, "word": "one"},
+        {"start": 1.15, "end": 1.6, "word": "sentence."},
+    ],
+    "turns": [
+        {"start": 0.0, "end": 0.8, "speaker": "SPEAKER_00"},
+        {"start": 0.8, "end": 1.12, "speaker": "SPEAKER_01"},
+        {"start": 1.12, "end": 2.0, "speaker": "SPEAKER_00"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_align_folds_mid_sentence_flicker_by_default(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/audio/align",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json=FLICKER_PAYLOAD,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["speakers"] == ["SPEAKER_00"]
+    assert [segment["text"] for segment in body["segments"]] == [
+        "this is one sentence."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_align_smoothing_can_be_disabled(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIREN_SMOOTH_MAX_WORDS", "0")
+
+    response = await client.post(
+        "/v1/audio/align",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json=FLICKER_PAYLOAD,
+    )
+
+    assert response.status_code == 200
+    assert [segment["speaker"] for segment in response.json()["segments"]] == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_00",
+    ]
 
 
 @pytest.mark.asyncio

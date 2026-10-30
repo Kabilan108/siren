@@ -4,9 +4,12 @@ import time
 import pytest
 
 from siren.alignment import (
+    SpeakerSmoothing,
     align_words,
     assign_speakers_to_words,
+    get_speaker_smoothing,
     segment_aligned_words,
+    smooth_speaker_runs,
 )
 from siren.schemas import AlignedWord, DiarizationTurn, TranscriptionWord
 
@@ -209,6 +212,168 @@ def test_same_speaker_run_reuses_maximum_span_rule() -> None:
     )
 
     assert [segment.text for segment in segments] == ["one two", "three"]
+
+
+def speakers(words: list[AlignedWord]) -> list[str]:
+    return [item.speaker for item in words]
+
+
+def test_smoothing_folds_flicker_inside_continuous_turn() -> None:
+    words = [
+        aligned_word(0.0, 0.3, "so", "SPEAKER_00"),
+        aligned_word(0.35, 0.6, "we", "SPEAKER_00"),
+        aligned_word(0.65, 0.9, "should", "SPEAKER_01"),
+        aligned_word(0.95, 1.2, "probably", "SPEAKER_01"),
+        aligned_word(1.25, 1.5, "ship", "SPEAKER_00"),
+        aligned_word(1.55, 1.8, "it", "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == ["SPEAKER_00"] * 6
+    assert [item.word for item in smoothed] == [item.word for item in words]
+
+
+def test_smoothing_keeps_reply_after_finished_sentence_and_pause() -> None:
+    words = [
+        aligned_word(0.0, 0.5, "assuming.", "SPEAKER_00"),
+        aligned_word(0.66, 0.98, "Yeah.", "SPEAKER_01"),
+        aligned_word(1.3, 1.5, "And", "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing(max_gap=0.3))
+
+    assert speakers(smoothed) == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]
+
+
+def test_smoothing_folds_mid_sentence_fragment_despite_pause() -> None:
+    words = [
+        aligned_word(0.0, 0.4, "you're", "SPEAKER_00"),
+        aligned_word(0.4, 0.8, "talking", "SPEAKER_00"),
+        aligned_word(0.8, 1.04, "about,", "SPEAKER_01"),
+        aligned_word(3.1, 3.4, "but", "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+    timing_only = smooth_speaker_runs(
+        words,
+        SpeakerSmoothing(fold_mid_sentence=False),
+    )
+
+    assert speakers(smoothed) == ["SPEAKER_00"] * 4
+    assert speakers(timing_only) == speakers(words)
+
+
+def test_smoothing_keeps_run_with_too_many_words() -> None:
+    words = [
+        aligned_word(0.0, 0.1, "a", "SPEAKER_00"),
+        aligned_word(0.1, 0.2, "b", "SPEAKER_01"),
+        aligned_word(0.2, 0.3, "c", "SPEAKER_01"),
+        aligned_word(0.3, 0.4, "d", "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing(max_words=1))
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_keeps_run_longer_than_max_seconds() -> None:
+    words = [
+        aligned_word(0.0, 0.5, "well", "SPEAKER_00"),
+        aligned_word(0.5, 2.0, "absolutely", "SPEAKER_01"),
+        aligned_word(2.0, 2.5, "anyway", "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing(max_seconds=1.0))
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_keeps_short_run_between_different_speakers() -> None:
+    words = [
+        aligned_word(0.0, 0.3, "done", "SPEAKER_00"),
+        aligned_word(0.3, 0.5, "okay", "SPEAKER_01"),
+        aligned_word(0.5, 0.8, "next", "SPEAKER_02"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_leaves_edge_runs_alone() -> None:
+    words = [
+        aligned_word(0.0, 0.2, "hi", "SPEAKER_01"),
+        aligned_word(0.2, 0.4, "so", "SPEAKER_00"),
+        aligned_word(0.4, 0.6, "about", "SPEAKER_00"),
+        aligned_word(0.6, 0.8, "that", "SPEAKER_00"),
+        aligned_word(0.8, 1.0, "plan", "SPEAKER_00"),
+        aligned_word(1.0, 1.2, "bye", "SPEAKER_01"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_align_words_smoothing_avoids_segment_split() -> None:
+    words = [
+        word(0.0, 0.4, "this"),
+        word(0.45, 0.8, "is"),
+        word(0.85, 1.1, "one"),
+        word(1.15, 1.6, "sentence"),
+    ]
+    turns = [
+        turn(0.0, 0.8, "SPEAKER_00"),
+        turn(0.8, 1.12, "SPEAKER_01"),
+        turn(1.12, 2.0, "SPEAKER_00"),
+    ]
+
+    unsmoothed = align_words(words, turns)
+    smoothed = align_words(words, turns, smoothing=SpeakerSmoothing())
+
+    assert [segment.speaker for segment in unsmoothed.segments] == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_00",
+    ]
+    assert [(segment.speaker, segment.text) for segment in smoothed.segments] == [
+        ("SPEAKER_00", "this is one sentence"),
+    ]
+    assert smoothed.speakers == ["SPEAKER_00"]
+
+
+def test_get_speaker_smoothing_reads_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIREN_SMOOTH_MAX_WORDS", "2")
+    monkeypatch.setenv("SIREN_SMOOTH_MAX_SECONDS", "0.8")
+    monkeypatch.setenv("SIREN_SMOOTH_MAX_GAP", "0.25")
+    monkeypatch.setenv("SIREN_SMOOTH_MID_SENTENCE", "false")
+
+    assert get_speaker_smoothing() == SpeakerSmoothing(
+        max_words=2,
+        max_seconds=0.8,
+        max_gap=0.25,
+        fold_mid_sentence=False,
+    )
+
+
+def test_get_speaker_smoothing_rejects_invalid_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIREN_SMOOTH_MID_SENTENCE", "maybe")
+
+    with pytest.raises(ValueError, match="SIREN_SMOOTH_MID_SENTENCE"):
+        get_speaker_smoothing()
+
+
+def test_get_speaker_smoothing_disabled_by_zero_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIREN_SMOOTH_MAX_WORDS", "0")
+
+    assert get_speaker_smoothing() is None
 
 
 def test_alignment_performance_smoke() -> None:
