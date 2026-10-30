@@ -355,13 +355,111 @@ def test_smoothing_pause_bound_protects_unfinished_fragment() -> None:
 def test_smoothing_treats_closing_quote_as_finished_sentence() -> None:
     words = [
         *utterance(0.0, ["he", "said", "\u201cwe\u2019re", "done.\u201d"], "SPEAKER_00"),
-        aligned_word(1.3, 1.5, "right", "SPEAKER_01"),
+        aligned_word(1.3, 1.5, "then", "SPEAKER_01"),
         *utterance(2.2, ["So", "anyway."], "SPEAKER_00"),
     ]
 
     smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
 
     assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_keeps_lowercase_standalone_reply() -> None:
+    words = [
+        *utterance(0.0, ["Do", "you", "need", "diagrams?", "No,"], "SPEAKER_00"),
+        *utterance(1.53, ["that", "was", "one."], "SPEAKER_01", step=0.2),
+        *utterance(2.6, ["Alright,", "back", "up."], "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == speakers(words)
+
+
+@pytest.mark.parametrize("reply", ["no.", "No.", "\u201cno.\u201d", "yeah", "okay", "mhm."])
+def test_smoothing_keeps_reply_word_glued_to_unfinished_sentence(reply: str) -> None:
+    words = [
+        *utterance(0.0, ["and", "then", "if"], "SPEAKER_00"),
+        aligned_word(0.75, 0.95, reply, "SPEAKER_01"),
+        *utterance(0.95, ["okay", "then."], "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_keeps_rapid_unpunctuated_reply() -> None:
+    words = [
+        *utterance(0.0, ["can", "you", "guys", "still", "hear", "me"], "SPEAKER_00"),
+        aligned_word(1.91, 2.07, "yeah", "SPEAKER_01"),
+        *utterance(3.51, ["okay", "sorry", "about", "that"], "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_unpunctuated_stretch_needs_both_sides_glued() -> None:
+    one_side = [
+        *utterance(0.0, ["things", "that", "rely", "on", "healthcare"], "SPEAKER_00"),
+        aligned_word(1.45, 1.6, "data", "SPEAKER_01"),
+        *utterance(2.56, ["such", "that", "you", "can", "succeed"], "SPEAKER_00"),
+    ]
+    both_sides = [
+        *utterance(0.0, ["i", "know", "you", "do", "right", "to", "you"], "SPEAKER_00"),
+        aligned_word(2.37, 2.5, "so", "SPEAKER_01"),
+        *utterance(2.74, ["so", "just", "an", "up"], "SPEAKER_00"),
+    ]
+
+    assert speakers(smooth_speaker_runs(one_side, SpeakerSmoothing())) == speakers(
+        one_side
+    )
+    assert speakers(smooth_speaker_runs(both_sides, SpeakerSmoothing())) == [
+        "SPEAKER_00"
+    ] * len(both_sides)
+
+
+def test_smoothing_never_folds_answer_to_question() -> None:
+    words = [
+        *utterance(0.0, ["How", "many", "do", "you", "need?"], "SPEAKER_00"),
+        aligned_word(1.55, 1.7, "Two", "SPEAKER_01"),
+        *utterance(1.75, ["of", "them,", "please."], "SPEAKER_00"),
+    ]
+
+    smoothed = smooth_speaker_runs(words, SpeakerSmoothing())
+
+    assert speakers(smoothed) == speakers(words)
+
+
+def test_smoothing_folds_sentence_end_with_no_silent_frame() -> None:
+    words = [
+        *utterance(0.0, ["a", "banner", "that", "shows", "what", "it"], "SPEAKER_00"),
+        aligned_word(1.75, 1.9, "is.", "SPEAKER_01"),
+        *utterance(3.1, ["And", "then", "this."], "SPEAKER_00"),
+    ]
+    with_gap = [
+        *words[:6],
+        words[6].model_copy(update={"start": 1.83, "end": 1.98}),
+        *words[7:],
+    ]
+
+    assert speakers(smooth_speaker_runs(words, SpeakerSmoothing())) == [
+        "SPEAKER_00"
+    ] * len(words)
+    assert speakers(smooth_speaker_runs(with_gap, SpeakerSmoothing())) == speakers(
+        with_gap
+    )
+
+
+def test_get_speaker_smoothing_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIREN_SPEAKER_SMOOTHING", "false")
+    assert get_speaker_smoothing() is None
+
+    monkeypatch.setenv("SIREN_SPEAKER_SMOOTHING", "maybe")
+    with pytest.raises(ValueError, match="SIREN_SPEAKER_SMOOTHING"):
+        get_speaker_smoothing()
 
 
 @pytest.mark.parametrize(

@@ -19,20 +19,36 @@ _TIE_TOLERANCE = 1e-6
 _DEFAULT_SPEAKER = "SPEAKER_00"
 _IndexedTurn = tuple[int, DiarizationTurn]
 _SENTENCE_END = re.compile(r"[.?!\u2026][\"'\u201d\u2019\u00bb)\]}]*$")
-_OPENING_MARKS = "\"'\u201c\u2018\u00ab([{"
+_QUESTION_END = re.compile(r"\?[\"'\u201d\u2019\u00bb)\]}]*$")
+_PUNCTUATION = re.compile(r"[.,?!;:\u2026]")
+_WORD_MARKS = "\"'\u201c\u201d\u2018\u2019\u00ab\u00bb()[]{}.,?!;:\u2026"
+# Words that open a reply or backchannel; a run starting with one is never folded.
+_REPLY_WORDS = frozenset(
+    {
+        "absolutely", "agreed", "alright", "correct", "cool", "definitely",
+        "exactly", "gotcha", "great", "hmm", "mhm", "mm", "nah", "no", "nope",
+        "ok", "okay", "oh", "perfect", "right", "sure", "thank", "thanks",
+        "totally", "true", "uh-huh", "wow", "yeah", "yep", "yes", "yup",
+    }
+)
+# Parakeet TDT timestamps step in 80 ms frames; a smaller gap means no silent
+# frame between the words.
+_CONTINUOUS_GAP = 0.04
+_CONTEXT_WORDS = 8
 
 
 @dataclass(frozen=True)
 class SpeakerSmoothing:
     """Limits for folding a short speaker run back into the surrounding turn.
 
-    A run of at most ``max_words`` words and ``max_seconds`` seconds, between
-    two runs of one other speaker, is folded into that speaker when it is
-    glued to an unfinished sentence: the word before it does not end a
-    sentence and follows it by less than ``max_pause`` seconds, or the run's
-    own last word does not end a sentence and the next word follows it by
-    less than ``max_pause``. A run punctuated as a whole sentence, or set off
-    by pauses of at least ``max_pause``, keeps its speaker.
+    A candidate run has at most ``max_words`` words and ``max_seconds``
+    seconds and sits between two runs of one other speaker. It is never folded
+    when it starts with a reply word ("yeah", "no", "okay", ...) or follows a
+    question. A run that ends a sentence counts as a standalone reply unless
+    the word before it is unfinished and flows into it with no silent frame.
+    Otherwise it is folded when it is glued to an unfinished sentence on one
+    side by a gap under ``max_pause``; where the surrounding words carry no
+    punctuation, both gaps must be under ``max_pause``.
     """
 
     max_words: int = 3
@@ -41,6 +57,11 @@ class SpeakerSmoothing:
 
 
 def get_speaker_smoothing() -> SpeakerSmoothing | None:
+    enabled = os.environ.get("SIREN_SPEAKER_SMOOTHING", "true").lower()
+    if enabled not in {"true", "false", "1", "0"}:
+        raise ValueError("SIREN_SPEAKER_SMOOTHING must be true/false or 1/0")
+    if enabled in {"false", "0"}:
+        return None
     defaults = SpeakerSmoothing()
     smoothing = SpeakerSmoothing(
         max_words=int(
@@ -97,14 +118,20 @@ def _is_flicker(
         return False
     if run[-1].end - run[0].start > smoothing.max_seconds:
         return False
-    if _is_whole_sentence(run):
+    if _bare_word(run[0].word) in _REPLY_WORDS:
+        return False
+    previous = before[-1].word
+    if _QUESTION_END.search(previous.strip()):
         return False
     gap_before = run[0].start - before[-1].end
     gap_after = after[0].start - run[-1].end
-    glued_before = (
-        not _ends_sentence(before[-1].word) and gap_before < smoothing.max_pause
-    )
-    glued_after = not _ends_sentence(run[-1].word) and gap_after < smoothing.max_pause
+    context = [*before[-_CONTEXT_WORDS:], *run, *after[:_CONTEXT_WORDS]]
+    if not any(_PUNCTUATION.search(word.word) for word in context):
+        return gap_before < smoothing.max_pause and gap_after < smoothing.max_pause
+    if _ends_sentence(run[-1].word):
+        return not _ends_sentence(previous) and gap_before < _CONTINUOUS_GAP
+    glued_before = not _ends_sentence(previous) and gap_before < smoothing.max_pause
+    glued_after = gap_after < smoothing.max_pause
     return glued_before or glued_after
 
 
@@ -112,9 +139,8 @@ def _ends_sentence(word: str) -> bool:
     return _SENTENCE_END.search(word.strip()) is not None
 
 
-def _is_whole_sentence(run: Sequence[AlignedWord]) -> bool:
-    first = run[0].word.strip().lstrip(_OPENING_MARKS)
-    return first[:1].isupper() and _ends_sentence(run[-1].word)
+def _bare_word(word: str) -> str:
+    return word.strip().strip(_WORD_MARKS).lower()
 
 
 def assign_speakers_to_words(

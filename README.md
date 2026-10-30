@@ -63,23 +63,25 @@ The meeting pipeline therefore uses 10 minutes as its retry and progress unit.
 ## Speaker smoothing
 
 Transcript jobs and `POST /v1/audio/align` fold short speaker flickers back
-into the surrounding turn after assigning words to diarization turns. A
-candidate is a run of at most `SIREN_SMOOTH_MAX_WORDS` words (default 3)
+into the surrounding turn after assigning words to diarization turns.
+`SIREN_SPEAKER_SMOOTHING` turns this on or off (default `true`).
+
+A candidate is a run of at most `SIREN_SMOOTH_MAX_WORDS` words (default 3)
 spanning at most `SIREN_SMOOTH_MAX_SECONDS` (default 1.0) between two runs of
-the same other speaker. It is reassigned to that speaker when it is glued to an
-unfinished sentence:
+the same other speaker. Runs are decided left to right against the already
+merged turn. A candidate keeps its speaker when:
 
-- the word before it does not end with `.`, `?`, `!` or `…` (closing quotes
-  and brackets allowed) and the run starts less than `SIREN_SMOOTH_MAX_PAUSE`
-  seconds (default 0.5) after it, or
-- the run's own last word does not end a sentence and the next word follows
-  within `SIREN_SMOOTH_MAX_PAUSE`.
+- it starts with a reply word ("yeah", "no", "okay", "mhm", "thanks", ...), or
+- the word before it ends with `?`, or
+- it ends a sentence (`.`, `?`, `!`, `…`, closing quotes allowed), unless the
+  word before it is unfinished and flows into it with no silent 80 ms frame.
 
-A run punctuated as a whole sentence ("Yeah.", "No.") keeps its speaker, as
-does a run set off by pauses of at least `SIREN_SMOOTH_MAX_PAUSE`. Runs are
-decided left to right against the already merged turn, so alternating
-fragments collapse into the surrounding speaker. Set
-`SIREN_SMOOTH_MAX_WORDS=0` to disable smoothing.
+Otherwise it is folded when it is glued to an unfinished sentence: the word
+before it does not end a sentence and the run starts less than
+`SIREN_SMOOTH_MAX_PAUSE` seconds (default 0.5) after it, or the next word
+follows the run within that pause. Where the 8 words on either side carry no
+punctuation, as in Parakeet's unpunctuated stretches, both gaps must be under
+the pause.
 
 ## Whisper recognition defaults
 
