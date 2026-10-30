@@ -114,6 +114,8 @@
                 pkgs.uv
                 pkgs.stdenv.cc
                 pkgs.ffmpeg
+                # uv sync fetches the git-pinned nemo-toolkit
+                pkgs.git
               ];
 
               environment = {

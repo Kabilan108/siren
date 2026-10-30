@@ -22,13 +22,13 @@ dependencies = [
     "jiwer==3.1.0",
     "kaldi-python-io==1.2.2",
     "kaldialign==0.9.1",
-    "lhotse==1.32.2",
+    "lhotse==2.0.0a6",
     "librosa==0.11.0",
     "lightning==2.4.0",
     "loguru==0.7.3",
     "marshmallow==4.3.0",
     "mediapy==1.1.6",
-    "nemo-toolkit==2.7.2",
+    "nemo-toolkit @ git+https://github.com/NVIDIA-NeMo/NeMo@a837f4e588ca778f46e586a8ad1acf5dc9a244a7",
     "nv-one-logger-core==2.3.1",
     "nv-one-logger-pytorch-lightning-integration==2.3.1",
     "nv-one-logger-training-telemetry==2.3.1",
@@ -76,6 +76,7 @@ module-root = ""
 
 [tool.uv]
 environments = ["sys_platform != 'emscripten' and sys_platform != 'win32'"]
+no-sources = true
 
 [tool.pytest.ini_options]
 addopts = "-m 'not golden'"

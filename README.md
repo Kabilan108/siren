@@ -76,6 +76,17 @@ A reply such as "Yeah." after a finished sentence and a real pause keeps its
 own speaker. Set `SIREN_SMOOTH_MAX_WORDS=0` to disable smoothing. The defaults
 come from `results/diarization-eval-2026-10-30/`.
 
+## Diarization model
+
+`SIREN_DIARIZE_MODEL` selects the Sortformer checkpoint. The default is
+`nvidia/diar_streaming_sortformer_4spk-v2.1`, which labels at most four
+speakers. `nvidia/Nemotron-3-Diarization` labels up to eight. It needs the
+pinned NeMo main-branch commit in `pyproject.toml` because NeMo 3.0.0 lacks its
+RoPE attention, and that commit needs `lhotse==2.0.0a6`. Installing a git
+dependency needs `git` on the PATH of `uv sync`. On several meeting recordings
+Nemotron reported far more overlapped speech and more labels than attendees,
+so it stays opt-in; see `results/diarization-eval-2026-10-30/`.
+
 ## Whisper recognition defaults
 
 Whisper backends share a fixed recognition recipe for dictation and durable
