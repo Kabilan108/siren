@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from siren.alignment import align_words
+from siren.alignment import align_words, get_speaker_smoothing
 from siren.api.auth import verify_token
 from siren.concurrency import run_in_worker_thread
 from siren.schemas import AlignmentRequest, AlignmentResponse
@@ -32,6 +32,7 @@ async def align_audio(request: AlignmentRequest) -> AlignmentResponse:
             align_words,
             request.words,
             request.turns,
+            smoothing=get_speaker_smoothing(),
         )
     except ValueError as exc:
         raise HTTPException(

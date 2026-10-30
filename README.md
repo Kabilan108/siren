@@ -60,6 +60,22 @@ bounded chunks. A representative meeting benchmark completed 5-minute and
 10-minute Parakeet chunks successfully; a 20-minute chunk exhausted GPU memory.
 The meeting pipeline therefore uses 10 minutes as its retry and progress unit.
 
+## Speaker smoothing
+
+Transcript jobs and `POST /v1/audio/align` fold short speaker flickers back
+into the surrounding turn after assigning words to diarization turns. A run of
+at most `SIREN_SMOOTH_MAX_WORDS` words (default 3) spanning at most
+`SIREN_SMOOTH_MAX_SECONDS` (default 1.0) between two runs of the same other
+speaker is reassigned to that speaker when either:
+
+- the word before it does not end a sentence (`.`, `?` or `!`), controlled by
+  `SIREN_SMOOTH_MID_SENTENCE` (default `true`), or
+- the gaps on both sides are under `SIREN_SMOOTH_MAX_GAP` seconds (default 0.3).
+
+A reply such as "Yeah." after a finished sentence and a real pause keeps its
+own speaker. Set `SIREN_SMOOTH_MAX_WORDS=0` to disable smoothing. The defaults
+come from `results/diarization-eval-2026-10-30/`.
+
 ## Whisper recognition defaults
 
 Whisper backends share a fixed recognition recipe for dictation and durable
