@@ -1,6 +1,9 @@
 import math
+import os
+import re
 from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
+from dataclasses import dataclass
 from itertools import groupby
 
 from siren.schemas import (
@@ -15,6 +18,129 @@ from siren.segmentation import segment_words
 _TIE_TOLERANCE = 1e-6
 _DEFAULT_SPEAKER = "SPEAKER_00"
 _IndexedTurn = tuple[int, DiarizationTurn]
+_SENTENCE_END = re.compile(r"([.?!\u2026]+)[\"'\u201d\u2019\u00bb)\]}]*$")
+_WORD_MARKS = "\"'\u201c\u201d\u2018\u2019\u00ab\u00bb()[]{}.,?!;:\u2026"
+# Words that open a reply or backchannel; a run starting with one is never folded.
+_REPLY_WORDS = frozenset(
+    {
+        "absolutely", "agreed", "alright", "correct", "cool", "definitely",
+        "exactly", "gotcha", "great", "hmm", "mhm", "mm", "nah", "no", "nope",
+        "ok", "okay", "oh", "perfect", "right", "sure", "thank", "thanks",
+        "totally", "true", "uh-huh", "wow", "yeah", "yep", "yes", "yup",
+    }
+)
+# Parakeet TDT timestamps step in 80 ms frames; a smaller gap means no silent
+# frame between the words.
+_CONTINUOUS_GAP = 0.04
+
+
+@dataclass(frozen=True)
+class SpeakerSmoothing:
+    """Limits for folding a short speaker run back into the surrounding turn.
+
+    A candidate run has at most ``max_words`` words and ``max_seconds``
+    seconds and sits between two runs of one other speaker, with gaps on both
+    sides of at least zero and under ``max_pause``. A pause or an overlap on
+    either side keeps its speaker. So does a run that starts with a reply word
+    ("yeah", "no", "okay", ...) or follows a question. A run that ends a
+    sentence is folded only when the word before it is unfinished and flows
+    into it with no silent frame.
+    """
+
+    max_words: int = 3
+    max_seconds: float = 1.0
+    max_pause: float = 0.5
+
+
+def get_speaker_smoothing() -> SpeakerSmoothing | None:
+    enabled = os.environ.get("SIREN_SPEAKER_SMOOTHING", "false").lower()
+    if enabled not in {"true", "false", "1", "0"}:
+        raise ValueError("SIREN_SPEAKER_SMOOTHING must be true/false or 1/0")
+    if enabled in {"false", "0"}:
+        return None
+    defaults = SpeakerSmoothing()
+    smoothing = SpeakerSmoothing(
+        max_words=int(
+            os.environ.get("SIREN_SMOOTH_MAX_WORDS", str(defaults.max_words))
+        ),
+        max_seconds=float(
+            os.environ.get("SIREN_SMOOTH_MAX_SECONDS", str(defaults.max_seconds))
+        ),
+        max_pause=float(
+            os.environ.get("SIREN_SMOOTH_MAX_PAUSE", str(defaults.max_pause))
+        ),
+    )
+    if smoothing.max_words <= 0 or smoothing.max_seconds <= 0.0:
+        return None
+    return smoothing
+
+
+def smooth_speaker_runs(
+    words: Sequence[AlignedWord],
+    smoothing: SpeakerSmoothing,
+) -> list[AlignedWord]:
+    """Reassign short runs glued inside another speaker's sentence.
+
+    Runs are decided left to right against the already merged turn, so a
+    folded run joins its neighbours before the next run is judged.
+    """
+    runs = [list(run) for _speaker, run in groupby(words, key=lambda w: w.speaker)]
+    merged: list[list[AlignedWord]] = []
+    for index, run in enumerate(runs):
+        if (
+            merged
+            and index < len(runs) - 1
+            and _is_flicker(merged[-1], run, runs[index + 1], smoothing)
+        ):
+            speaker = merged[-1][0].speaker
+            run = [word.model_copy(update={"speaker": speaker}) for word in run]
+        if merged and merged[-1][0].speaker == run[0].speaker:
+            merged[-1].extend(run)
+        else:
+            merged.append(run)
+    return [word for run in merged for word in run]
+
+
+def _is_flicker(
+    before: Sequence[AlignedWord],
+    run: Sequence[AlignedWord],
+    after: Sequence[AlignedWord],
+    smoothing: SpeakerSmoothing,
+) -> bool:
+    speaker = before[0].speaker
+    if speaker != after[0].speaker or speaker == run[0].speaker:
+        return False
+    if len(run) > smoothing.max_words:
+        return False
+    if run[-1].end - run[0].start > smoothing.max_seconds:
+        return False
+    if _bare_word(run[0].word) in _REPLY_WORDS:
+        return False
+    previous = before[-1].word
+    if "?" in _terminal_marks(previous):
+        return False
+    gap_before = run[0].start - before[-1].end
+    gap_after = after[0].start - run[-1].end
+    if not (0.0 <= gap_before < smoothing.max_pause):
+        return False
+    if not (0.0 <= gap_after < smoothing.max_pause):
+        return False
+    if _ends_sentence(run[-1].word):
+        return not _ends_sentence(previous) and gap_before < _CONTINUOUS_GAP
+    return True
+
+
+def _terminal_marks(word: str) -> str:
+    match = _SENTENCE_END.search(word.strip())
+    return "" if match is None else match.group(1)
+
+
+def _ends_sentence(word: str) -> bool:
+    return _terminal_marks(word) != ""
+
+
+def _bare_word(word: str) -> str:
+    return word.strip().strip(_WORD_MARKS).lower()
 
 
 def assign_speakers_to_words(
@@ -147,6 +273,7 @@ def align_words(
     *,
     pause_threshold: float = 0.6,
     max_segment_seconds: float = 30.0,
+    smoothing: SpeakerSmoothing | None = None,
 ) -> AlignmentResponse:
     """Assign speakers and build speaker-aware transcript segments."""
     sorted_words = sorted(words, key=lambda word: (word.start, word.end))
@@ -154,6 +281,8 @@ def align_words(
     _validate_intervals(sorted_words, "words")
     _validate_intervals(sorted_turns, "turns")
     aligned_words = _assign_speakers_to_sorted_words(sorted_words, sorted_turns)
+    if smoothing is not None:
+        aligned_words = smooth_speaker_runs(aligned_words, smoothing)
     segments = segment_aligned_words(
         aligned_words,
         pause_threshold=pause_threshold,

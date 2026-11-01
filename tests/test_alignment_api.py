@@ -120,7 +120,69 @@ async def test_align_runs_computation_in_worker_thread(
         )
 
     assert response.status_code == 200
-    run_in_worker_thread.assert_awaited_once_with(align_words, [], [])
+    run_in_worker_thread.assert_awaited_once_with(
+        align_words,
+        [],
+        [],
+        smoothing=None,
+    )
+
+
+FLICKER_PAYLOAD = {
+    "words": [
+        {"start": 0.0, "end": 0.4, "word": "this"},
+        {"start": 0.45, "end": 0.8, "word": "is"},
+        {"start": 0.85, "end": 1.1, "word": "one"},
+        {"start": 1.15, "end": 1.6, "word": "sentence."},
+    ],
+    "turns": [
+        {"start": 0.0, "end": 0.8, "speaker": "SPEAKER_00"},
+        {"start": 0.8, "end": 1.12, "speaker": "SPEAKER_01"},
+        {"start": 1.12, "end": 2.0, "speaker": "SPEAKER_00"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_align_keeps_flicker_by_default(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SIREN_SPEAKER_SMOOTHING", raising=False)
+
+    response = await client.post(
+        "/v1/audio/align",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json=FLICKER_PAYLOAD,
+    )
+
+    assert response.status_code == 200
+    assert [segment["speaker"] for segment in response.json()["segments"]] == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+        "SPEAKER_00",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_align_folds_mid_sentence_flicker_when_enabled(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIREN_SPEAKER_SMOOTHING", "true")
+
+    response = await client.post(
+        "/v1/audio/align",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json=FLICKER_PAYLOAD,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["speakers"] == ["SPEAKER_00"]
+    assert [segment["text"] for segment in body["segments"]] == [
+        "this is one sentence."
+    ]
 
 
 @pytest.mark.asyncio
