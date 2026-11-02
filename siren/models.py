@@ -1,7 +1,12 @@
 import asyncio
 import logging
+import tempfile
+import time
+import wave
+from pathlib import Path
 from typing import TypedDict
 
+import numpy as np
 import torch
 from fastapi import HTTPException, status
 from faster_whisper import WhisperModel
@@ -69,6 +74,65 @@ def load_backend(
     return WhisperBackend(WhisperModel(model_name, **get_whisper_params()))
 
 
+WARMUP_SECONDS = 1.5
+WARMUP_SAMPLE_RATE = 16000
+
+
+def write_warmup_wav() -> str:
+    """Write a near-silent 16 kHz mono WAV (low-level noise, not digital zero)."""
+    rng = np.random.default_rng(0)
+    samples = rng.normal(0.0, 30.0, int(WARMUP_SECONDS * WARMUP_SAMPLE_RATE))
+    pcm = np.clip(samples, -32768, 32767).astype("<i2")
+    with tempfile.NamedTemporaryFile(
+        delete=False, prefix="siren-warmup-", suffix=".wav"
+    ) as handle:
+        path = handle.name
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(WARMUP_SAMPLE_RATE)
+        wav_file.writeframes(pcm.tobytes())
+    return path
+
+
+async def warm_up_backend(
+    backend: TranscriptionBackend,
+    model_name: str,
+    *,
+    request_id: str | None = None,
+) -> None:
+    """Pay CUDA/cuDNN/Triton first-use costs before a real request does.
+
+    Uses the backend's normal transcribe path (default vocabulary included).
+    Failures are logged only; a cold model still serves requests.
+    """
+    fields: dict[str, object] = {"model": model_name}
+    if request_id is not None:
+        fields["request_id"] = request_id
+    path: str | None = None
+    start = time.perf_counter()
+    try:
+        path = await run_in_worker_thread(write_warmup_wav)
+        await backend.transcribe(path, request_id="warmup")
+        log_event(
+            logging.INFO,
+            "model_warmup_complete",
+            latency_ms=int((time.perf_counter() - start) * 1000),
+            **fields,
+        )
+    except Exception as exc:
+        log_event(
+            logging.WARNING,
+            "model_warmup_failed",
+            latency_ms=int((time.perf_counter() - start) * 1000),
+            error=str(exc),
+            **fields,
+        )
+    finally:
+        if path is not None:
+            Path(path).unlink(missing_ok=True)
+
+
 async def _load_model_in_background(
     target_model: str,
     *,
@@ -85,6 +149,7 @@ async def _load_model_in_background(
             target_model,
             request_id=request_id,
         )
+        await warm_up_backend(backend, target_model, request_id=request_id)
         current_backend = backend
         current_model_name = target_model
         config.save_model_name(target_model, request_id=request_id)

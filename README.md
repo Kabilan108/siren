@@ -125,6 +125,19 @@ model selection; changing the Python default alone does not override saved state
 {"status":"ok","version":"1.2.1"}
 ```
 
+## Dictation on Parakeet
+
+These settings apply to `POST /v1/audio/transcriptions` with a Parakeet model.
+Settings are read when the model loads; restart the service after changing them.
+
+### Warmup
+
+After a model loads or is swapped in, siren transcribes 1.5 s of near-silent
+noise through the normal request path, including the default boost list. The
+first real request then skips most of the CUDA, cuDNN and Triton first-use cost.
+The log records `model_warmup_complete` with `latency_ms`. A failed warmup logs
+`model_warmup_failed` and the model still serves requests.
+
 ### Parakeet terminology hint
 
 Set `SIREN_PARAKEET_CLAUDE_HINT=true` to enable the evaluated single-term
