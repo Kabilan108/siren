@@ -1,3 +1,5 @@
+import logging
+from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +11,7 @@ from numpy.typing import NDArray
 from siren import config
 from siren.backends.speech_gate import has_speech
 from siren.concurrency import run_in_worker_thread
+from siren.logging_utils import log_event
 from siren.schemas import (
     TranscriptionResult,
     TranscriptionSegment,
@@ -95,7 +98,16 @@ class WhisperBackend:
         language: str | None = None,
         word_timestamps: bool = False,
         request_id: str | None = None,
+        vocabulary: Sequence[str] | None = None,
     ) -> TranscriptionResult:
+        # Whisper keeps its fixed terminology prompt; boost lists are Parakeet-only.
+        if vocabulary is not None:
+            log_event(
+                logging.INFO,
+                "vocabulary_ignored",
+                request_id=request_id,
+                reason="model does not support boosting",
+            )
         return await process_whisper_transcription(
             audio_path,
             self.model,

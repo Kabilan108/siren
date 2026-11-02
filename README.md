@@ -125,12 +125,75 @@ model selection; changing the Python default alone does not override saved state
 {"status":"ok","version":"1.2.1"}
 ```
 
-### Parakeet terminology hint
+## Dictation on Parakeet
 
-Set `SIREN_PARAKEET_CLAUDE_HINT=true` to enable the evaluated single-term
-`Claude` hint at strength 0.125 for `nvidia/parakeet-tdt-0.6b-v2`. It is
-disabled by default and does not affect other Parakeet models. Restart the
-service after changing it. This improves selected name spellings, not
-sentence-level recognition or negations. On NixOS set
-`TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` for Triton CUDA discovery.
-User-configurable request vocabularies remain separate future work.
+These settings apply to `POST /v1/audio/transcriptions` with a Parakeet model.
+Settings are read when the model loads; restart the service after changing them.
+
+### Warmup
+
+After a model loads or is swapped in, siren transcribes 1.5 s of near-silent
+noise through the normal request path, including the default boost list. The
+first real request then skips most of the CUDA, cuDNN and Triton first-use cost.
+The log records `model_warmup_complete` with `latency_ms`. A failed warmup logs
+`model_warmup_failed` and the model still serves requests.
+With `SIREN_WHISPER_SPEECH_GATE=true` the gate rejects the warmup clip, so
+Whisper models stay cold until their first real request.
+
+### Speech gate
+
+`SIREN_PARAKEET_SPEECH_GATE` (default `true`) runs the same whole-input Silero
+check as the Whisper gate before Parakeet inference. When it finds no speech,
+the response is `{"text": ""}` with status 200 (or an empty `verbose_json` with
+the audio duration) and no inference runs. Gated requests log
+`transcribe_gated`. If the check itself fails, siren logs `speech_gate_failed`
+and transcribes anyway. Set it to `false` to always transcribe.
+
+Durable jobs call their backend directly and are not gated, except when
+`SIREN_JOB_ASR_URL` routes their chunks through this endpoint; then a chunk
+with no detected speech returns no words.
+
+### Vocabulary boosting
+
+`nvidia/parakeet-tdt-0.6b-v2` accepts an optional multipart field `vocabulary`,
+a JSON array of terms to boost:
+
+```bash
+curl -H "Authorization: Bearer $SIREN_API_KEY" \
+  -F "file=@dictation.wav" \
+  -F "model=nvidia/parakeet-tdt-0.6b-v2" \
+  -F 'vocabulary=["Claude", "tmux", "Sietch"]' \
+  https://siren.example/v1/audio/transcriptions
+```
+
+- At most 200 terms, each 1-64 characters after trimming, with no control
+  characters. Duplicates are dropped case-insensitively; the first spelling
+  wins. Anything else is a 400 with a message naming the problem.
+- Omitting the field, or sending it empty, uses the server default list (other
+  form fields treat an empty value the same way). `[]` turns boosting off for
+  that request.
+- Other Parakeet models and Whisper validate the field but ignore it. Whisper
+  keeps its fixed terminology prompt.
+
+Boosting builds a NeMo greedy boosting tree. siren keeps the four most recently
+used lists built, keyed by the normalized term set (order does not matter), and
+swaps decoding state only when a request's list differs from the active one.
+Swaps happen under the inference lock, so they never overlap a running request.
+On the RTX 3090, a 50-term list outside the cache adds about 100 ms to its
+first request: about 50 ms to build the tree and decoder, the rest to capture
+CUDA graphs on the first decode. Swapping in a cached list takes about 5 ms,
+and each cached list holds about 30 MiB of GPU memory. Once active, a 50-term
+list decodes as fast as no list. Send the same list on every request.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIREN_PARAKEET_BOOST_TERMS` | unset | Default list as a JSON array, same rules as `vocabulary`. `[]` means no default boosting. |
+| `SIREN_PARAKEET_CLAUDE_HINT` | `false` | When `SIREN_PARAKEET_BOOST_TERMS` is unset, `true` makes the default `["Claude"]`. |
+| `SIREN_PARAKEET_BOOST_CONTEXT_SCORE` | `1.0` | Score per arc in the boosting tree. |
+| `SIREN_PARAKEET_BOOST_DEPTH_SCALING` | `2.0` | Depth scaling of the boosting tree. |
+| `SIREN_PARAKEET_BOOST_ALPHA` | `0.125` | Fusion weight of the tree (`boosting_tree_alpha`), at least 0. |
+
+The defaults are the evaluated single-term `Claude` hint. It improved selected
+name spellings, not sentence-level recognition or negations. Boosting also needs
+Triton; on NixOS set `TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` for its CUDA
+discovery.

@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         log_event(logging.ERROR, "job_runner_start_failed", error=str(exc))
     try:
+        # Read per request; fail startup instead of the first request on a typo.
+        config.parakeet_speech_gate_enabled()
         models.current_model_name = config.load_model_name()
         await models.ensure_model_loaded(models.current_model_name)
         yield

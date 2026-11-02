@@ -1,12 +1,17 @@
+import copy
 import logging
 import math
-import os
+import threading
 import time
 import warnings
+from collections import OrderedDict
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
+from siren import config
 from siren.audio import get_wav_info
 from siren.concurrency import run_in_worker_thread
 from siren.logging_utils import log_event
@@ -15,6 +20,7 @@ from siren.schemas import (
     TranscriptionSegment,
     TranscriptionWord,
 )
+from siren.vocabulary import vocabulary_key
 
 
 def get_cuda_stats() -> dict[str, int]:
@@ -104,22 +110,150 @@ def parakeet_segments(
     return segments
 
 
+BOOSTING_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
+DECODING_CACHE_SIZE = 4
+
+
+@dataclass
+class _DecodingState:
+    decoding: Any
+    wer: Any
+    cfg: Any
+
+
+class BoostingDecoder:
+    """Keeps a small LRU of built decoding states keyed by boost-term list.
+
+    Building a state through `change_decoding_strategy` constructs the GPU
+    boosting tree and a fresh greedy decoder whose CUDA graphs are captured on
+    first use. Reinstalling a cached state only reassigns the model attributes
+    that `change_decoding_strategy` sets. Callers must hold `lock` from
+    `activate` through the end of inference.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        *,
+        default_terms: Sequence[str],
+        params: config.BoostingParams,
+        cache_size: int = DECODING_CACHE_SIZE,
+    ) -> None:
+        from nemo.collections.asr.parts.submodules.rnnt_decoding import (
+            RNNTBPEDecodingConfig,
+        )
+        from omegaconf import OmegaConf
+
+        defaults = OmegaConf.create(
+            OmegaConf.to_container(OmegaConf.structured(RNNTBPEDecodingConfig))
+        )
+        self.model = model
+        self.default_terms = list(default_terms)
+        self.params = params
+        self.cache_size = cache_size
+        self.lock = threading.Lock()
+        self._base_cfg = OmegaConf.merge(defaults, model.cfg.decoding)
+        self._cache: OrderedDict[tuple[str, ...], _DecodingState] = OrderedDict()
+        self._active: tuple[str, ...] | None = None
+
+    def decoding_cfg(self, key: tuple[str, ...]) -> Any:
+        from omegaconf import open_dict
+
+        cfg = copy.deepcopy(self._base_cfg)
+        with open_dict(cfg):
+            # compute_timestamps must already be true: transcribe(timestamps=True)
+            # otherwise rebuilds the decoder and silently drops the cached state.
+            cfg.strategy = "greedy_batch"
+            cfg.compute_timestamps = True
+            if key:
+                cfg.greedy.boosting_tree.key_phrases_list = list(key)
+                cfg.greedy.boosting_tree.context_score = self.params.context_score
+                cfg.greedy.boosting_tree.depth_scaling = self.params.depth_scaling
+                cfg.greedy.boosting_tree.use_triton = True
+                cfg.greedy.boosting_tree_alpha = self.params.alpha
+            else:
+                cfg.greedy.boosting_tree.key_phrases_list = None
+                cfg.greedy.boosting_tree_alpha = 0.0
+        return cfg
+
+    def activate(self, terms: Sequence[str] | None) -> dict[str, object]:
+        resolved = self.default_terms if terms is None else terms
+        key = vocabulary_key(resolved)
+        fields: dict[str, object] = {
+            "boost_terms": len(key),
+            "boost_source": "default" if terms is None else "request",
+        }
+        if key == self._active:
+            self._cache.move_to_end(key)
+            fields["decoding_swap"] = "none"
+            return fields
+
+        start = time.perf_counter()
+        state = self._cache.get(key)
+        # A failed build can leave the model half-switched; force a reinstall.
+        self._active = None
+        if state is None:
+            self.model.change_decoding_strategy(self.decoding_cfg(key), verbose=False)
+            state = _DecodingState(
+                decoding=self.model.decoding,
+                wer=self.model.wer,
+                cfg=copy.deepcopy(self.model.cfg.decoding),
+            )
+            self._cache[key] = state
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+            fields["decoding_swap"] = "built"
+        else:
+            self._install(state)
+            self._cache.move_to_end(key)
+            fields["decoding_swap"] = "cached"
+        self._active = key
+        fields["decoding_swap_ms"] = round((time.perf_counter() - start) * 1000, 1)
+        return fields
+
+    def _install(self, state: _DecodingState) -> None:
+        """Mirror the assignments NeMo's change_decoding_strategy makes."""
+        from omegaconf import open_dict
+
+        model = self.model
+        model.decoding = state.decoding
+        model.wer = state.wer
+        joint_fused_batch_size = getattr(state.decoding, "joint_fused_batch_size", None)
+        if model.joint.fuse_loss_wer or (
+            joint_fused_batch_size is not None and joint_fused_batch_size > 0
+        ):
+            model.joint.set_loss(model.loss)
+            model.joint.set_wer(state.wer)
+        model.joint.temperature = state.cfg.get("temperature", 1.0)
+        with open_dict(model.cfg.decoding):
+            model.cfg.decoding = state.cfg
+
+
 async def process_parakeet_transcription(
     audio_path: str,
     model: Any,
     *,
     word_timestamps: bool = False,
     request_id: str | None = None,
+    decoder: BoostingDecoder | None = None,
+    vocabulary: Sequence[str] | None = None,
 ) -> TranscriptionResult:
     audio_info = get_wav_info(audio_path, request_id=request_id)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
 
+    decoding_fields: dict[str, object] = {}
+
+    def run() -> Any:
+        if decoder is None:
+            return model.transcribe([audio_path], timestamps=True, verbose=False)
+        with decoder.lock:
+            decoding_fields.update(decoder.activate(vocabulary))
+            return model.transcribe([audio_path], timestamps=True, verbose=False)
+
     start = time.perf_counter()
-    output = await run_in_worker_thread(
-        lambda: model.transcribe([audio_path], timestamps=True, verbose=False),
-    )
+    output = await run_in_worker_thread(run)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -129,6 +263,7 @@ async def process_parakeet_transcription(
         "parakeet_transcribe",
         request_id=request_id,
         latency_ms=elapsed_ms,
+        **decoding_fields,
         **audio_info,
         **get_cuda_stats(),
     )
@@ -152,8 +287,9 @@ async def process_parakeet_transcription(
 
 
 class ParakeetBackend:
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, *, decoder: BoostingDecoder | None = None) -> None:
         self.model = model
+        self.decoder = decoder
 
     async def transcribe(
         self,
@@ -162,46 +298,44 @@ class ParakeetBackend:
         language: str | None = None,
         word_timestamps: bool = False,
         request_id: str | None = None,
+        vocabulary: Sequence[str] | None = None,
     ) -> TranscriptionResult:
+        if vocabulary is not None and self.decoder is None:
+            log_event(
+                logging.INFO,
+                "vocabulary_ignored",
+                request_id=request_id,
+                reason="model does not support boosting",
+            )
         return await process_parakeet_transcription(
             audio_path,
             self.model,
             word_timestamps=word_timestamps,
             request_id=request_id,
+            decoder=self.decoder,
+            vocabulary=vocabulary,
         )
 
 
-def configure_claude_hint(model: Any, model_name: str) -> None:
-    """Apply the evaluated hint only to the evaluated TDT checkpoint."""
-    enabled = os.environ.get("SIREN_PARAKEET_CLAUDE_HINT", "false").lower()
-    if enabled not in {"true", "false", "1", "0"}:
-        raise ValueError("SIREN_PARAKEET_CLAUDE_HINT must be true/false or 1/0")
-    if enabled not in {"true", "1"} or model_name != "nvidia/parakeet-tdt-0.6b-v2":
-        return
-
-    from nemo.collections.asr.parts.submodules.rnnt_decoding import (
-        RNNTBPEDecodingConfig,
-    )
-    from omegaconf import OmegaConf, open_dict
-
-    defaults = OmegaConf.create(
-        OmegaConf.to_container(OmegaConf.structured(RNNTBPEDecodingConfig))
-    )
-    cfg = OmegaConf.merge(defaults, model.cfg.decoding)
-    with open_dict(cfg):
-        cfg.strategy = "greedy_batch"
-        cfg.compute_timestamps = True
-        cfg.greedy.boosting_tree.key_phrases_list = ["Claude"]
-        cfg.greedy.boosting_tree.context_score = 1.0
-        cfg.greedy.boosting_tree.depth_scaling = 2.0
-        cfg.greedy.boosting_tree.use_triton = True
-        cfg.greedy.boosting_tree_alpha = 0.125
-    model.change_decoding_strategy(cfg)
+def boosting_decoder_for(
+    model: Any,
+    model_name: str,
+    *,
+    default_terms: Sequence[str],
+    params: config.BoostingParams,
+) -> BoostingDecoder | None:
+    """Only the evaluated TDT checkpoint gets vocabulary boosting."""
+    if model_name != BOOSTING_MODEL:
+        return None
+    return BoostingDecoder(model, default_terms=default_terms, params=params)
 
 
 def load_parakeet_backend(model_name: str) -> ParakeetBackend:
     warnings.filterwarnings("ignore", module="nemo")
     warnings.filterwarnings("ignore", message=".*torchaudio.*")
+    # Read settings before the slow model load so a malformed value fails fast.
+    default_terms = config.parakeet_default_vocabulary()
+    params = config.parakeet_boosting_params()
 
     import nemo.collections.asr as nemo_asr
 
@@ -209,5 +343,7 @@ def load_parakeet_backend(model_name: str) -> ParakeetBackend:
     if torch.cuda.is_available():
         model = model.cuda()
     model.eval()
-    configure_claude_hint(model, model_name)
-    return ParakeetBackend(model)
+    decoder = boosting_decoder_for(
+        model, model_name, default_terms=default_terms, params=params
+    )
+    return ParakeetBackend(model, decoder=decoder)
