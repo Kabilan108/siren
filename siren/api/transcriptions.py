@@ -17,6 +17,7 @@ from siren.schemas import (
     VerboseTranscriptionResponse,
 )
 from siren.segmentation import segment_words
+from siren.vocabulary import MAX_TERM_CHARS, MAX_TERMS, parse_vocabulary
 
 router = APIRouter()
 
@@ -74,6 +75,15 @@ async def transcribe_audio(
         "native",
         description="Segment construction mode. Supported segmentation values: native (backend-native segments) and pause (word-driven Parakeet segments).",
     ),
+    vocabulary: str | None = Form(
+        None,
+        description=(
+            "JSON array of terms to boost for nvidia/parakeet-tdt-0.6b-v2, "
+            f"at most {MAX_TERMS} terms of 1-{MAX_TERM_CHARS} characters. "
+            "Omit it to use the server default; [] disables boosting. "
+            "Other models ignore it."
+        ),
+    ),
 ) -> VerboseTranscriptionResponse | TranscriptionResponse:
     original_path: str | None = None
     converted_path: str | None = None
@@ -101,6 +111,15 @@ async def transcribe_audio(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="timestamp_granularities requires response_format=verbose_json.",
+                )
+        boost_terms: list[str] | None = None
+        if vocabulary is not None:
+            try:
+                boost_terms = parse_vocabulary(vocabulary)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid vocabulary: {exc}",
                 )
         return_word_timestamps = (
             timestamp_granularities is not None
@@ -130,6 +149,7 @@ async def transcribe_audio(
             audio_bytes=audio_size,
             word_timestamps=word_timestamps,
             segmentation=segmentation,
+            vocabulary_terms=None if boost_terms is None else len(boost_terms),
             **audio_info,
         )
 
@@ -156,6 +176,7 @@ async def transcribe_audio(
                     language=language,
                     word_timestamps=word_timestamps,
                     request_id=request_id,
+                    vocabulary=boost_terms,
                 )
 
         if segmentation == "pause" and not gated:

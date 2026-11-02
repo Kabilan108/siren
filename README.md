@@ -151,12 +151,46 @@ Durable jobs call their backend directly and are not gated, except when
 `SIREN_JOB_ASR_URL` routes their chunks through this endpoint; then a chunk
 with no detected speech returns no words.
 
-### Parakeet terminology hint
+### Vocabulary boosting
 
-Set `SIREN_PARAKEET_CLAUDE_HINT=true` to enable the evaluated single-term
-`Claude` hint at strength 0.125 for `nvidia/parakeet-tdt-0.6b-v2`. It is
-disabled by default and does not affect other Parakeet models. Restart the
-service after changing it. This improves selected name spellings, not
-sentence-level recognition or negations. On NixOS set
-`TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` for Triton CUDA discovery.
-User-configurable request vocabularies remain separate future work.
+`nvidia/parakeet-tdt-0.6b-v2` accepts an optional multipart field `vocabulary`,
+a JSON array of terms to boost:
+
+```bash
+curl -H "Authorization: Bearer $SIREN_API_KEY" \
+  -F "file=@dictation.wav" \
+  -F "model=nvidia/parakeet-tdt-0.6b-v2" \
+  -F 'vocabulary=["Claude", "tmux", "Sietch"]' \
+  https://siren.example/v1/audio/transcriptions
+```
+
+- At most 200 terms, each 1-64 characters after trimming, with no control
+  characters. Duplicates are dropped case-insensitively; the first spelling
+  wins. Anything else is a 400 with a message naming the problem.
+- Omitting the field uses the server default list. `[]` turns boosting off for
+  that request.
+- Other Parakeet models and Whisper validate the field but ignore it. Whisper
+  keeps its fixed terminology prompt.
+
+Boosting builds a NeMo greedy boosting tree. siren keeps the four most recently
+used lists built, keyed by the normalized term set (order does not matter), and
+swaps decoding state only when a request's list differs from the active one.
+Swaps happen under the inference lock, so they never overlap a running request.
+On the RTX 3090, a 50-term list outside the cache adds about 100 ms to its
+first request: about 50 ms to build the tree and decoder, the rest to capture
+CUDA graphs on the first decode. Swapping in a cached list takes about 5 ms,
+and each cached list holds about 30 MiB of GPU memory. Once active, a 50-term
+list decodes as fast as no list. Send the same list on every request.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIREN_PARAKEET_BOOST_TERMS` | unset | Default list as a JSON array, same rules as `vocabulary`. `[]` means no default boosting. |
+| `SIREN_PARAKEET_CLAUDE_HINT` | `false` | When `SIREN_PARAKEET_BOOST_TERMS` is unset, `true` makes the default `["Claude"]`. |
+| `SIREN_PARAKEET_BOOST_CONTEXT_SCORE` | `1.0` | Score per arc in the boosting tree. |
+| `SIREN_PARAKEET_BOOST_DEPTH_SCALING` | `2.0` | Depth scaling of the boosting tree. |
+| `SIREN_PARAKEET_BOOST_ALPHA` | `0.125` | Fusion weight of the tree (`boosting_tree_alpha`), at least 0. |
+
+The defaults are the evaluated single-term `Claude` hint. It improved selected
+name spellings, not sentence-level recognition or negations. Boosting also needs
+Triton; on NixOS set `TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` for its CUDA
+discovery.

@@ -70,6 +70,47 @@ def harness(tmp_path: Path) -> Iterator[Harness]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "form,expected",
+    [
+        ({}, None),
+        ({"vocabulary": "[]"}, []),
+        ({"vocabulary": '[" tmux ", "Sietch", "TMUX"]'}, ["tmux", "Sietch"]),
+    ],
+)
+async def test_vocabulary_reaches_the_backend_normalized(
+    client: httpx.AsyncClient, harness: Harness, form: dict[str, str], expected: list[str] | None,
+) -> None:
+    response = await harness.post(client, model=PARAKEET, **form)
+    assert response.status_code == 200
+    assert harness.backend.transcribe.call_args.kwargs["vocabulary"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    ["tmux", '{"a": 1}', "[1, 2]", '[""]', '["' + "x" * 65 + '"]', "[" + ",".join(['"t"'] * 201) + "]"],
+)
+async def test_malformed_vocabulary_is_rejected_before_upload(
+    client: httpx.AsyncClient, harness: Harness, raw: str,
+) -> None:
+    response = await harness.post(client, model=PARAKEET, vocabulary=raw)
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Invalid vocabulary: vocabulary")
+    harness.save_upload.assert_not_awaited()
+    harness.get_backend.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_whisper_accepts_and_validates_vocabulary(
+    client: httpx.AsyncClient, harness: Harness,
+) -> None:
+    assert (await harness.post(client, model=WHISPER, vocabulary="nope")).status_code == 400
+    response = await harness.post(client, model=WHISPER, vocabulary='["tmux"]')
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "response_format,expected",
     [
         ("json", {"text": ""}),
