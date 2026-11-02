@@ -23,13 +23,22 @@ WHISPER_INITIAL_PROMPT = (
 )
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "true" if default else "false").lower()
+    if value not in {"true", "false", "1", "0"}:
+        raise ValueError(f"{name} must be true/false or 1/0")
+    return value in {"true", "1"}
+
+
 def whisper_speech_gate_enabled() -> bool:
     # Enable after audio review; independent of the recognition recipe so a
     # false rejection can be disabled without reverting the model/settings.
-    value = os.environ.get("SIREN_WHISPER_SPEECH_GATE", "false").lower()
-    if value not in {"true", "false", "1", "0"}:
-        raise ValueError("SIREN_WHISPER_SPEECH_GATE must be true/false or 1/0")
-    return value in {"true", "1"}
+    return _env_flag("SIREN_WHISPER_SPEECH_GATE", False)
+
+
+def parakeet_speech_gate_enabled() -> bool:
+    """Skip Parakeet inference on sync requests whose audio has no speech."""
+    return _env_flag("SIREN_PARAKEET_SPEECH_GATE", True)
 
 PARAKEET_MODELS = [
     "nvidia/parakeet-tdt-0.6b-v2",

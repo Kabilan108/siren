@@ -5,14 +5,44 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
-from siren import models
+from siren import config, models
 from siren.api.auth import verify_token
 from siren.audio import ensure_16k_wav, get_wav_info, save_upload_file
+from siren.backends.speech_gate import file_has_speech
+from siren.concurrency import run_in_worker_thread
 from siren.logging_utils import log_event
-from siren.schemas import TranscriptionResponse, VerboseTranscriptionResponse
+from siren.schemas import (
+    TranscriptionResponse,
+    TranscriptionResult,
+    VerboseTranscriptionResponse,
+)
 from siren.segmentation import segment_words
 
 router = APIRouter()
+
+
+async def _speech_gate_rejects(audio_path: str, *, request_id: str) -> tuple[bool, int]:
+    """Return (no speech found, gate ms). A failing check lets the request through."""
+    start = time.perf_counter()
+    try:
+        speech = await run_in_worker_thread(file_has_speech, audio_path)
+    except Exception as exc:
+        log_event(
+            logging.WARNING,
+            "speech_gate_failed",
+            request_id=request_id,
+            error=str(exc),
+        )
+        speech = True
+    gate_ms = int((time.perf_counter() - start) * 1000)
+    if not speech:
+        log_event(
+            logging.INFO,
+            "transcribe_gated",
+            request_id=request_id,
+            gate_ms=gate_ms,
+        )
+    return not speech, gate_ms
 
 
 @router.post(
@@ -103,19 +133,32 @@ async def transcribe_audio(
             **audio_info,
         )
 
-        async with models.inference_semaphore:
-            backend = await models.get_transcription_backend(
-                target_model,
-                request_id=request_id,
+        gated = False
+        gate_ms: int | None = None
+        if models.is_parakeet_model(target_model) and config.parakeet_speech_gate_enabled():
+            # Silero runs on the CPU, so the gate stays outside the GPU semaphore.
+            gated, gate_ms = await _speech_gate_rejects(audio_path, request_id=request_id)
+        if gated:
+            result = TranscriptionResult(
+                text="",
+                language="en",
+                duration=float(audio_info.get("audio_duration_sec", 0.0)),
+                segments=[],
             )
-            result = await backend.transcribe(
-                audio_path,
-                language=language,
-                word_timestamps=word_timestamps,
-                request_id=request_id,
-            )
+        else:
+            async with models.inference_semaphore:
+                backend = await models.get_transcription_backend(
+                    target_model,
+                    request_id=request_id,
+                )
+                result = await backend.transcribe(
+                    audio_path,
+                    language=language,
+                    word_timestamps=word_timestamps,
+                    request_id=request_id,
+                )
 
-        if segmentation == "pause":
+        if segmentation == "pause" and not gated:
             words = [
                 word
                 for segment in result.segments
@@ -142,6 +185,8 @@ async def transcribe_audio(
             segment_count=len(result.segments),
             word_timestamps=word_timestamps,
             segmentation=segmentation,
+            gated=gated,
+            gate_ms=gate_ms,
         )
         if response_format == "verbose_json":
             payload = result.model_dump()

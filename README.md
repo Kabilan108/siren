@@ -138,6 +138,19 @@ first real request then skips most of the CUDA, cuDNN and Triton first-use cost.
 The log records `model_warmup_complete` with `latency_ms`. A failed warmup logs
 `model_warmup_failed` and the model still serves requests.
 
+### Speech gate
+
+`SIREN_PARAKEET_SPEECH_GATE` (default `true`) runs the same whole-input Silero
+check as the Whisper gate before Parakeet inference. When it finds no speech,
+the response is `{"text": ""}` with status 200 (or an empty `verbose_json` with
+the audio duration) and no inference runs. Gated requests log
+`transcribe_gated`. If the check itself fails, siren logs `speech_gate_failed`
+and transcribes anyway. Set it to `false` to always transcribe.
+
+Durable jobs call their backend directly and are not gated, except when
+`SIREN_JOB_ASR_URL` routes their chunks through this endpoint; then a chunk
+with no detected speech returns no words.
+
 ### Parakeet terminology hint
 
 Set `SIREN_PARAKEET_CLAUDE_HINT=true` to enable the evaluated single-term

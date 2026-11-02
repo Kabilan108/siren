@@ -79,3 +79,35 @@ def test_invalid_gate_setting_is_not_silently_enabled(monkeypatch: pytest.Monkey
     monkeypatch.setenv("SIREN_WHISPER_SPEECH_GATE", "typo")
     with pytest.raises(ValueError, match="SIREN_WHISPER_SPEECH_GATE"):
         config.whisper_speech_gate_enabled()
+
+
+def _write_wav(path, samples: np.ndarray, rate: int) -> str:
+    import wave
+
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(rate)
+        wav_file.writeframes(samples.astype("<i2").tobytes())
+    return str(path)
+
+
+def test_gate_reads_16k_pcm_like_decode_audio(tmp_path) -> None:
+    from faster_whisper.audio import decode_audio
+
+    samples = (np.sin(np.linspace(0, 200, 16000)) * 12000).astype(np.int16)
+    path = _write_wav(tmp_path / "tone.wav", samples, 16000)
+    np.testing.assert_allclose(
+        speech_gate.read_16k_mono(path), decode_audio(path, sampling_rate=16000), atol=1e-4
+    )
+
+
+def test_gate_falls_back_to_decoding_other_formats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    path = _write_wav(tmp_path / "8k.wav", np.zeros(800, dtype=np.int16), 8000)
+    decoded = np.zeros(1600, dtype=np.float32)
+    decode = MagicMock(return_value=decoded)
+    monkeypatch.setattr(speech_gate, "decode_audio", decode)
+    assert speech_gate.read_16k_mono(path) is decoded
+    decode.assert_called_once_with(path, sampling_rate=16000)
