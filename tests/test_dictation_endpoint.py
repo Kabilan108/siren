@@ -73,6 +73,7 @@ def harness(tmp_path: Path) -> Iterator[Harness]:
     "form,expected",
     [
         ({}, None),
+        ({"vocabulary": ""}, None),
         ({"vocabulary": "[]"}, []),
         ({"vocabulary": '[" tmux ", "Sietch", "TMUX"]'}, ["tmux", "Sietch"]),
     ],

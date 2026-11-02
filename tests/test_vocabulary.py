@@ -41,6 +41,7 @@ def test_parse_vocabulary_normalizes_valid_lists(raw: str, expected: list[str]) 
         (json.dumps(["x" * (MAX_TERM_CHARS + 1)]), "1-64 characters"),
         (json.dumps([f"t{i}" for i in range(MAX_TERMS + 1)]), "at most 200 terms; got 201"),
         ('["line\\nbreak"]', "control characters"),
+        ("[" * 10000 + "]" * 10000, "nested too deeply"),
     ],
 )
 def test_parse_vocabulary_rejects_malformed_input(raw: str, message: str) -> None:

@@ -40,6 +40,8 @@ def parse_vocabulary(raw: str, *, source: str = "vocabulary") -> list[str]:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{source} must be a JSON array of strings ({exc.msg})")
+    except RecursionError:
+        raise ValueError(f"{source} must be a JSON array of strings (nested too deeply)")
     return normalize_vocabulary(value, source=source)
 
 

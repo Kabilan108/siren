@@ -137,6 +137,8 @@ noise through the normal request path, including the default boost list. The
 first real request then skips most of the CUDA, cuDNN and Triton first-use cost.
 The log records `model_warmup_complete` with `latency_ms`. A failed warmup logs
 `model_warmup_failed` and the model still serves requests.
+With `SIREN_WHISPER_SPEECH_GATE=true` the gate rejects the warmup clip, so
+Whisper models stay cold until their first real request.
 
 ### Speech gate
 
@@ -167,7 +169,8 @@ curl -H "Authorization: Bearer $SIREN_API_KEY" \
 - At most 200 terms, each 1-64 characters after trimming, with no control
   characters. Duplicates are dropped case-insensitively; the first spelling
   wins. Anything else is a 400 with a message naming the problem.
-- Omitting the field uses the server default list. `[]` turns boosting off for
+- Omitting the field, or sending it empty, uses the server default list (other
+  form fields treat an empty value the same way). `[]` turns boosting off for
   that request.
 - Other Parakeet models and Whisper validate the field but ignore it. Whisper
   keeps its fixed terminology prompt.
